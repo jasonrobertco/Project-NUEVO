@@ -185,6 +185,12 @@ void executeCommand(const char* cmd) {
         return;
     }
 
+    // Hardware verify / diagnostic
+    if (strcmp(cmd, "V") == 0 || strcmp(cmd, "v") == 0) {
+        printHardwareDiagnostic();
+        return;
+    }
+
     // Sweep all channels
     if (strcmp(cmd, "W") == 0) {
         Serial.println(F(">>> Sweep ALL channels (press any key to stop)"));
@@ -335,6 +341,65 @@ void updateSweep() {
 }
 
 // ============================================================================
+// HARDWARE DIAGNOSTIC
+// ============================================================================
+
+void printHardwareDiagnostic() {
+    Serial.println(F("----------------------------------------"));
+    Serial.println(F("Hardware Diagnostic (reads back from PCA9685 over I2C):"));
+
+    // Check I2C error status
+    byte err = ServoController::getLastI2CError();
+    Serial.print(F("  Last I2C error: "));
+    Serial.print(err);
+    switch (err) {
+        case 0: Serial.println(F(" (OK — no error)")); break;
+        case 1: Serial.println(F(" (ERR — data too long for TX buffer)")); break;
+        case 2: Serial.println(F(" (ERR — NACK on address — device not found!)")); break;
+        case 3: Serial.println(F(" (ERR — NACK on data)")); break;
+        default: Serial.println(F(" (ERR — unknown)")); break;
+    }
+
+    // Read back channels 0-3 and compare stored vs hardware
+    Serial.println(F("  Channel readback (stored µs => expected ticks => actual hw ticks):"));
+    for (uint8_t ch = 0; ch < 4; ch++) {
+        uint16_t storedUs  = ServoController::getPositionUs(ch);
+        uint16_t expected  = ((uint32_t)storedUs * 4096UL + 10000UL) / 20000UL;
+        uint16_t hwTicks   = ServoController::readChannelPWM(ch);
+        byte     rdErr     = ServoController::getLastI2CError();
+
+        Serial.print(F("    Ch"));
+        Serial.print(ch);
+        Serial.print(F(": "));
+        Serial.print(storedUs);
+        Serial.print(F("µs => "));
+        Serial.print(expected);
+        Serial.print(F(" ticks expected, "));
+        Serial.print(hwTicks);
+        Serial.print(F(" actual"));
+        if (rdErr != 0) {
+            Serial.print(F("  [I2C ERR="));
+            Serial.print(rdErr);
+            Serial.print(F("]"));
+        } else if (hwTicks == expected || hwTicks == expected + 1 || hwTicks == expected - 1) {
+            Serial.print(F("  [MATCH]"));
+        } else if (storedUs == 0 && hwTicks == 0) {
+            Serial.print(F("  [OFF]"));
+        } else {
+            Serial.print(F("  [MISMATCH!]"));
+        }
+        Serial.println();
+    }
+
+    Serial.println(F(""));
+    Serial.println(F("  If I2C ERR=2: PCA9685 not found — check wiring/address"));
+    Serial.println(F("  If all MISMATCH: writes reaching chip but not stored (clock issue?)"));
+    Serial.println(F("  If MATCH but no servo movement: check OE pin (bridge to GND if floating)"));
+    Serial.println(F("  If MATCH and OE ok: check servo power and signal wire continuity"));
+    Serial.println(F("----------------------------------------"));
+}
+
+// ============================================================================
 // STATUS DISPLAY
 // ============================================================================
 
@@ -384,6 +449,7 @@ void printHelp() {
     Serial.println();
     Serial.println(F("Info:"));
     Serial.println(F("  ?              - Print status (auto every 5s)"));
+    Serial.println(F("  V              - Hardware verify (readback PCA9685 registers + I2C errors)"));
     Serial.println(F("  help           - Show this help"));
     Serial.println();
     Serial.println(F("Examples:"));

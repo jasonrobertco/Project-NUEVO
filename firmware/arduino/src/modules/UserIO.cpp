@@ -32,6 +32,7 @@ volatile uint16_t UserIO::prevButtonStates_ = 0;
 uint8_t  UserIO::limitStates_    = 0;
 uint8_t  UserIO::animPhase_      = 0;
 SystemState UserIO::lastAnimState_ = SYS_STATE_INIT;
+bool     UserIO::neoAutoAnimate_ = true;
 
 bool UserIO::initialized_ = false;
 
@@ -215,6 +216,10 @@ void UserIO::setNeoPixelBrightness(uint8_t brightness) {
     neopixel_.show();
 }
 
+void UserIO::setNeoAutoAnimate(bool enable) {
+    neoAutoAnimate_ = enable;
+}
+
 // ============================================================================
 // INTERNAL HELPERS
 // ============================================================================
@@ -343,6 +348,8 @@ void UserIO::hsvToRgb(uint8_t h, uint8_t s, uint8_t v,
 }
 
 void UserIO::updateNeoPixelAnimation() {
+    if (!neoAutoAnimate_) return;   // manual color control active — don't override
+
     SystemState state = SystemManager::getState();
 
     // Reset animation phase on state change for a clean visual transition

@@ -11,8 +11,9 @@
 // STATIC MEMBER INITIALIZATION
 // ============================================================================
 
-// PCA9685 at default I2C address (0x40)
-PCA9685 ServoController::pca9685_(0x00);  // Address pins A5-A0 = 0
+// PCA9685 at default I2C address (0x40), 100kHz (conservative; 400kHz default
+// causes error 4 if pull-up resistors are too weak for fast-mode timing)
+PCA9685 ServoController::pca9685_(0x00, Wire, 100000);
 
 // Default pulse width range (500-2500µs covers most servos)
 uint16_t ServoController::minPulseUs_ = 500;
@@ -25,6 +26,7 @@ float ServoController::maxAngleDeg_ = 180.0f;
 // State tracking
 bool ServoController::enabled_ = false;
 bool ServoController::initialized_ = false;
+bool ServoController::i2cError_ = false;
 uint16_t ServoController::channelPulseUs_[16] = {0};
 
 // ============================================================================
@@ -52,6 +54,19 @@ void ServoController::init() {
 
     // Set PWM frequency for servos (50Hz = 20ms period)
     pca9685_.setPWMFreqServo();
+
+    // Validate that the PCA9685 is actually responding: read back a channel
+    // register and verify we get 4 bytes without I2C error.
+    pca9685_.getChannelPWM(0);
+    if (pca9685_.getLastI2CError() != 0) {
+        i2cError_ = true;
+        // Leave initialized_ = false so callers know the device is absent.
+#ifdef DEBUG_SERVO
+        DEBUG_SERIAL.print(F("[ServoController] PCA9685 not responding — I2C error "));
+        DEBUG_SERIAL.println(pca9685_.getLastI2CError());
+#endif
+        return;
+    }
 
     // Configure OE pin if defined
 #ifdef PIN_SERVO_OE
@@ -106,6 +121,10 @@ void ServoController::disable() {
 #endif
 }
 
+bool ServoController::isInitialized() {
+    return initialized_;
+}
+
 bool ServoController::isEnabled() {
     return enabled_;
 }
@@ -127,6 +146,11 @@ void ServoController::setPositionUs(uint8_t channel, uint16_t pulseWidthUs) {
 
     // Set the channel
     pca9685_.setChannelPWM(channel, pwmValue);
+
+    // Track I2C health
+    if (pca9685_.getLastI2CError() != 0) {
+        i2cError_ = true;
+    }
 
     // Track the pulse width
     channelPulseUs_[channel] = pulseWidthUs;
@@ -207,6 +231,24 @@ void ServoController::setAngleRange(float minDeg, float maxDeg) {
 uint16_t ServoController::getPositionUs(uint8_t channel) {
     if (channel >= 16) return 0;
     return channelPulseUs_[channel];
+}
+
+uint16_t ServoController::readChannelPWM(uint8_t channel) {
+    if (channel >= 16) return 0;
+    if (!initialized_) return 0;
+    return pca9685_.getChannelPWM(channel);
+}
+
+byte ServoController::getLastI2CError() {
+    return pca9685_.getLastI2CError();
+}
+
+bool ServoController::hasI2CError() {
+    return i2cError_;
+}
+
+void ServoController::clearI2CError() {
+    i2cError_ = false;
 }
 
 // ============================================================================

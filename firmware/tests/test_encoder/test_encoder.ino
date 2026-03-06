@@ -81,14 +81,43 @@ void encoderISR_M2() {
     encoder2.onInterruptA();
 }
 
-// Motor 3 encoder ISR (if enabled)
-void encoderISR_M3() {
-    encoder3.onInterruptA();
+// Motor 1 phase B ISR (Rev. B: pin 3 = INT1, 4x mode only)
+#if ENCODER_1_MODE == ENCODER_4X
+void encoderISR_M1_B() {
+    encoder1.onInterruptB();
+}
+#endif
+
+// Motor 2 phase B ISR (Rev. B: pin 19 = INT4, 4x mode only)
+#if ENCODER_2_MODE == ENCODER_4X
+void encoderISR_M2_B() {
+    encoder2.onInterruptB();
+}
+#endif
+
+// Motor 3: PCINT2_vect — Port K
+//   M3_ENC_A = A14 = PINK bit 6 (PCINT22)
+//   M3_ENC_B = A15 = PINK bit 7 (PCINT23)
+// attachInterrupt() does NOT work for PCINT pins on the Mega — must use raw ISR.
+volatile uint8_t prevPINK_enc = 0;
+ISR(PCINT2_vect) {
+    uint8_t curPINK = PINK;
+    uint8_t changed  = curPINK ^ prevPINK_enc;
+    prevPINK_enc = curPINK;
+    if (changed & (1 << 6)) encoder3.onInterruptA();  // A14 = M3_ENC_A
+    if (changed & (1 << 7)) encoder3.onInterruptB();  // A15 = M3_ENC_B
 }
 
-// Motor 4 encoder ISR (if enabled)
-void encoderISR_M4() {
-    encoder4.onInterruptA();
+// Motor 4: PCINT0_vect — Port B
+//   M4_ENC_A = pin 11 = PINB bit 5 (PCINT5)
+//   M4_ENC_B = pin 12 = PINB bit 6 (PCINT6)
+volatile uint8_t prevPINB_enc = 0;
+ISR(PCINT0_vect) {
+    uint8_t curPINB = PINB;
+    uint8_t changed  = curPINB ^ prevPINB_enc;
+    prevPINB_enc = curPINB;
+    if (changed & (1 << 5)) encoder4.onInterruptA();  // pin 11 = M4_ENC_A
+    if (changed & (1 << 6)) encoder4.onInterruptB();  // pin 12 = M4_ENC_B
 }
 
 // ============================================================================
@@ -114,12 +143,28 @@ void setup() {
 
     DEBUG_SERIAL.println(F("[Setup] Encoders initialized"));
 
-    // Attach interrupt handlers
+    // M1: phase A (pin 2 = INT0), phase B (pin 3 = INT1, 4x only)
     attachInterrupt(digitalPinToInterrupt(PIN_M1_ENC_A), encoderISR_M1, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(PIN_M2_ENC_A), encoderISR_M2, CHANGE);
+#if ENCODER_1_MODE == ENCODER_4X
+    attachInterrupt(digitalPinToInterrupt(PIN_M1_ENC_B), encoderISR_M1_B, CHANGE);
+#endif
 
-    attachInterrupt(digitalPinToInterrupt(PIN_M3_ENC_A), encoderISR_M3, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(PIN_M4_ENC_A), encoderISR_M4, CHANGE);
+    // M2: phase A (pin 18 = INT5), phase B (pin 19 = INT4, 4x only)
+    attachInterrupt(digitalPinToInterrupt(PIN_M2_ENC_A), encoderISR_M2, CHANGE);
+#if ENCODER_2_MODE == ENCODER_4X
+    attachInterrupt(digitalPinToInterrupt(PIN_M2_ENC_B), encoderISR_M2_B, CHANGE);
+#endif
+
+    // M3: PCINT2 bank — A14 (PCINT22 = PINK bit 6), A15 (PCINT23 = PINK bit 7)
+    // attachInterrupt() does not support PCINT pins; ISR(PCINT2_vect) handles this above.
+    prevPINK_enc = PINK;                          // snapshot pin state before enabling
+    PCICR  |= (1 << PCIE2);                       // enable Port K PCINT bank
+    PCMSK2 |= (1 << PCINT22) | (1 << PCINT23);   // unmask A14 and A15
+
+    // M4: PCINT0 bank — pin 11 (PCINT5 = PINB bit 5), pin 12 (PCINT6 = PINB bit 6)
+    prevPINB_enc = PINB;                          // snapshot pin state before enabling
+    PCICR  |= (1 << PCIE0);                       // enable Port B PCINT bank
+    PCMSK0 |= (1 << PCINT5) | (1 << PCINT6);     // unmask pins 11 and 12
 
     DEBUG_SERIAL.println(F("[Setup] Encoder interrupts attached"));
 

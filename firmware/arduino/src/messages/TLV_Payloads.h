@@ -83,16 +83,14 @@ struct PayloadSystemStatus {
     uint16_t loopTimeAvgUs;         // Average control loop time (µs)
     uint16_t loopTimeMaxUs;         // Max control loop time since last status (µs)
     uint16_t uartRxErrors;          // Cumulative UART CRC/framing error count
-    float    wheelDiameterMm;       // Configured wheel diameter (mm)
-    float    wheelBaseMm;           // Configured wheel base center-to-center (mm)
     uint8_t  motorDirMask;          // Direction inversion bitmask (bit N = motor N)
     uint8_t  neoPixelCount;         // Configured NeoPixel count
     uint16_t heartbeatTimeoutMs;    // Configured liveness timeout (ms)
     uint16_t limitSwitchMask;       // Bitmask: bit N = GPIO N is a limit switch
     uint8_t  stepperHomeLimitGpio[4]; // GPIO index used as home limit per stepper; 0xFF = none
 };
-// 48 bytes: 4×uint8 + 3×uint32 + 2×uint16 + 2×uint8 + 4×uint16 + 2×float + 2×uint8 + 2×uint16 + uint8[4]
-//         = 4 + 12 + 4 + 2 + 8 + 8 + 2 + 4 + 4 = 48
+// 40 bytes: 4×uint8 + 3×uint32 + 6×uint16 + 2×uint8 + uint8[4]
+//         = 4 + 12 + 4 + 2 + 12 + 2 + 4 = 40
 
 /**
  * @brief System command payload (RPi → Arduino) — TLV type SYS_CMD (3)
@@ -116,8 +114,6 @@ struct PayloadSysCmd {
  * IDLE state only. Fields at sentinel value (0 or 0xFF) are not changed.
  */
 struct PayloadSysConfig {
-    float    wheelDiameterMm;       // Wheel diameter (mm); 0.0 = no change
-    float    wheelBaseMm;           // Wheel base (mm); 0.0 = no change
     uint8_t  motorDirMask;          // Direction inversion bitmask to apply
     uint8_t  motorDirChangeMask;    // Which motors to update (bitmask)
     uint8_t  neoPixelCount;         // NeoPixel count; 0 = no change
@@ -126,7 +122,7 @@ struct PayloadSysConfig {
     uint8_t  resetOdometry;         // 1 = reset x, y, theta to (0, 0, 0)
     uint8_t  reserved;              // Set to 0
 };
-// 16 bytes
+// 8 bytes
 
 /**
  * @brief Set PID gains payload (RPi → Arduino) — TLV type SYS_SET_PID (5)
@@ -462,7 +458,7 @@ struct PayloadSensorVoltage {
 struct PayloadSensorRange {
     uint8_t  sensorId;      // Sensor index (0-based)
     uint8_t  sensorType;    // 0 = ultrasonic, 1 = lidar
-    uint8_t  status;        // 0 = valid, 1 = out of range, 2 = sensor error
+    uint8_t  status;        // 0 = valid, 1 = out of range, 2 = sensor error, 3 = not installed
     uint8_t  reserved;      // Set to 0
     uint16_t distanceMm;    // Distance (mm); 0 if status ≠ 0
     uint16_t reserved2;     // Set to 0
@@ -588,9 +584,9 @@ struct PayloadIOStatus {
 
 // System payloads
 STATIC_ASSERT_SIZE(PayloadHeartbeat,    5);
-STATIC_ASSERT_SIZE(PayloadSystemStatus, 48);
+STATIC_ASSERT_SIZE(PayloadSystemStatus, 40);
 STATIC_ASSERT_SIZE(PayloadSysCmd,       4);
-STATIC_ASSERT_SIZE(PayloadSysConfig,    16);
+STATIC_ASSERT_SIZE(PayloadSysConfig,    8);
 STATIC_ASSERT_SIZE(PayloadSetPID,       24);
 
 // DC Motor payloads

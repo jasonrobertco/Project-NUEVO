@@ -151,28 +151,44 @@ public:
     // ========================================================================
 
     /**
-     * @brief Get number of active lidar sensors
+     * @brief Get number of lidar sensors that responded during init
      */
     static uint8_t getLidarCount() { return lidarCount_; }
 
     /**
-     * @brief Get number of active ultrasonic sensors
+     * @brief Get number of ultrasonic sensors that responded during init
      */
     static uint8_t getUltrasonicCount() { return ultrasonicCount_; }
 
     /**
+     * @brief True if the sensor at this slot responded during init.
+     *
+     * A sensor may be configured (LIDAR_COUNT > 0) but absent on the I2C bus.
+     * Use this to distinguish "configured but missing" from "not configured".
+     */
+    static bool isLidarFound(uint8_t idx);
+    static bool isUltrasonicFound(uint8_t idx);
+
+    /**
+     * @brief Number of sensor slots enabled at compile time (from config.h).
+     *
+     * Compare with getLidarCount() / getUltrasonicCount() to detect missing sensors:
+     *   missing = getLidarConfiguredCount() - getLidarCount()
+     */
+    static uint8_t getLidarConfiguredCount();
+    static uint8_t getUltrasonicConfiguredCount();
+
+    /**
      * @brief Get latest lidar distance reading
      *
-     * @param idx Sensor index (0-based, up to getLidarCount()-1)
-     * @return Distance in mm, 0 = error / no reading yet
+     * @param idx Slot index (0-based). Returns 0 if slot not found or out of range.
      */
     static uint16_t getLidarDistanceMm(uint8_t idx);
 
     /**
      * @brief Get latest ultrasonic distance reading
      *
-     * @param idx Sensor index (0-based, up to getUltrasonicCount()-1)
-     * @return Distance in mm, 0 = error / no reading yet
+     * @param idx Slot index (0-based). Returns 0 if slot not found or out of range.
      */
     static uint16_t getUltrasonicDistanceMm(uint8_t idx);
 
@@ -262,8 +278,10 @@ private:
     // ---- Range sensors ----
     static LidarDriver      lidars_[SENSOR_MAX_LIDARS];
     static UltrasonicDriver ultrasonics_[SENSOR_MAX_ULTRASONICS];
-    static uint8_t          lidarCount_;
-    static uint8_t          ultrasonicCount_;
+    static uint8_t          lidarCount_;        // # that responded during init
+    static uint8_t          ultrasonicCount_;   // # that responded during init
+    static bool             lidarFound_[SENSOR_MAX_LIDARS];       // per-slot init result
+    static bool             ultrasonicFound_[SENSOR_MAX_ULTRASONICS]; // per-slot init result
     static uint16_t         lidarDistMm_[SENSOR_MAX_LIDARS];
     static uint16_t         ultrasonicDistMm_[SENSOR_MAX_ULTRASONICS];
 

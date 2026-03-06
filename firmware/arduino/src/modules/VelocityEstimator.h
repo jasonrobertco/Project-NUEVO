@@ -140,6 +140,8 @@ private:
     uint8_t filterIndex_;
     uint8_t filterCount_;
 
+    bool initialized_;  // True after first valid edge is captured post-reset
+
     /**
      * @brief Add sample to moving average filter
      *

@@ -39,6 +39,7 @@
 #include "../messages/TLV_TypeDefs.h"
 #include "../messages/TLV_Payloads.h"
 #include "../config.h"
+#include "RobotKinematics.h"
 
 // Maximum TLV payload size we will accept from the RPi
 #define MAX_TLV_PAYLOAD_SIZE 256
@@ -94,6 +95,9 @@ public:
      * - SENSOR_IMU         (100 Hz, RUNNING, if IMU attached)
      * - SENSOR_KINEMATICS  (100 Hz, RUNNING)
      * - IO_STATUS          (100 Hz, RUNNING)
+     * - SENSOR_RANGE lidar ( 50 Hz, RUNNING, per configured lidar slot)
+     * - SENSOR_RANGE sonic ( 10 Hz, RUNNING, per configured ultrasonic slot)
+     *   (status=3 / not-installed is reported for slots that did not respond on init)
      * - SENSOR_VOLTAGE     ( 10 Hz, RUNNING or ERROR)
      * - SYS_STATUS         (  1 Hz IDLE/ESTOP, 10 Hz RUNNING/ERROR)
      * - SENSOR_MAG_CAL_STATUS (10 Hz while sampling; immediately on cmd response)
@@ -144,17 +148,8 @@ private:
     static uint16_t heartbeatTimeoutMs_; // Configurable timeout (ms)
 
     // ---- Configuration (from SYS_CONFIG) ----
-    static float    wheelDiameterMm_;   // Wheel diameter (mm), for odometry
-    static float    wheelBaseMm_;       // Wheel base center-to-center (mm)
     static uint8_t  motorDirMask_;      // Direction inversion bitmask
     static uint8_t  neoPixelCount_;     // Configured NeoPixel count
-
-    // ---- Odometry state ----
-    static float    odomX_;            // X position from start (mm)
-    static float    odomY_;            // Y position from start (mm)
-    static float    odomTheta_;        // Heading from start (radians, CCW+)
-    static int32_t  prevLeftTicks_;    // Previous left encoder count
-    static int32_t  prevRightTicks_;   // Previous right encoder count
 
     // ---- Servo enable tracking (bit N = channel N enabled) ----
     static uint16_t servoEnabledMask_;
@@ -176,6 +171,8 @@ private:
     static uint32_t lastIOStatusSendMs_;
     static uint32_t lastStatusSendMs_;
     static uint32_t lastMagCalSendMs_;
+    static uint32_t lastLidarSendMs_;
+    static uint32_t lastUltrasonicSendMs_;
 
     // ---- Queued async response ----
     // Set by handleMagCalCmd on STOP/SAVE/APPLY/CLEAR so the response is
@@ -290,21 +287,28 @@ private:
     /** @brief Append button/limit states and NeoPixel RGB (variable payload) */
     static void sendIOStatus();
 
-    /** @brief Append system state, version, and diagnostics (48 bytes payload) */
+    /** @brief Append system state, version, and diagnostics (40 bytes payload) */
     static void sendSystemStatus();
 
     /** @brief Append magnetometer calibration progress (44 bytes payload) */
     static void sendMagCalStatus();
 
+    /**
+     * @brief Append SENSOR_RANGE packets for all configured range sensors.
+     *
+     * For sensors that responded during init: sends the latest distance reading
+     * (status = 0, valid).
+     * For sensors configured in config.h but absent on the I2C bus:
+     * sends status = 3 (not installed) so the RPi can notify the user.
+     *
+     * @param lidarOnly  true = only lidar sensors (50 Hz path);
+     *                   false = only ultrasonic sensors (10 Hz path)
+     */
+    static void sendSensorRange(bool lidarOnly);
+
     // ========================================================================
     // HELPERS
     // ========================================================================
-
-    /** @brief Integrate encoder deltas into odomX_, odomY_, odomTheta_ */
-    static void updateOdometry();
-
-    /** @brief Reset odometry to (0, 0, 0) */
-    static void resetOdometry();
 
     /** @brief Return available SRAM in bytes */
     static uint16_t getFreeRAM();

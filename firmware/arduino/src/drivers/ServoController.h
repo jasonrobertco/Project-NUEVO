@@ -82,6 +82,15 @@ public:
     static void disable();
 
     /**
+     * @brief Check if the PCA9685 was successfully initialised
+     *
+     * Returns false if the device was absent or failed to respond during init().
+     *
+     * @return True if init() completed without I2C error
+     */
+    static bool isInitialized();
+
+    /**
      * @brief Check if outputs are enabled
      *
      * @return True if outputs are enabled
@@ -174,6 +183,42 @@ public:
      */
     static uint16_t getPositionUs(uint8_t channel);
 
+    /**
+     * @brief Read actual PWM tick count from PCA9685 hardware
+     *
+     * Reads the register value back over I2C for verification.
+     * Used to confirm that writes are reaching the hardware.
+     *
+     * @param channel Servo channel (0-15)
+     * @return Raw 12-bit PWM tick count (0-4096) as stored in hardware
+     */
+    static uint16_t readChannelPWM(uint8_t channel);
+
+    /**
+     * @brief Get the last I2C error code from the PCA9685 driver
+     *
+     * Returns the result code from the most recent endTransmission():
+     *   0 = success, 1 = buffer overflow, 2 = NACK on address, 3 = NACK on data
+     *
+     * @return Error code (0 = no error)
+     */
+    static byte getLastI2CError();
+
+    /**
+     * @brief Check if any I2C error has occurred since last clearI2CError()
+     *
+     * Set on init failure or on any failed write during operation.
+     * Useful for periodic health checks in the main loop.
+     *
+     * @return True if an I2C error has been recorded
+     */
+    static bool hasI2CError();
+
+    /**
+     * @brief Clear the I2C error flag
+     */
+    static void clearI2CError();
+
 private:
     // PCA9685 driver instance
     static PCA9685 pca9685_;
@@ -187,7 +232,8 @@ private:
     // State
     static bool enabled_;
     static bool initialized_;
-    static uint16_t channelPulseUs_[16];  // Last commanded pulse widths
+    static bool i2cError_;               // Set on any I2C failure; cleared by clearI2CError()
+    static uint16_t channelPulseUs_[16]; // Last commanded pulse widths
 
     // ========================================================================
     // INTERNAL HELPERS

@@ -80,9 +80,12 @@ void setup() {
     // Initialize UserIO
     Serial.println(F("[Setup] Initializing User I/O..."));
     UserIO::init();
+    // Disable SystemManager-driven NeoPixel animation — this test uses manual
+    // color control via setSystemStatus() / setNeoPixelColor() / commands.
+    UserIO::setNeoAutoAnimate(false);
     Serial.println(F("  - Buttons initialized"));
     Serial.println(F("  - LEDs initialized"));
-    Serial.println(F("  - NeoPixel initialized"));
+    Serial.println(F("  - NeoPixel initialized (manual color mode)"));
     Serial.println();
 
     Serial.println(F("[Setup] Initialization complete!"));
@@ -117,30 +120,25 @@ void setup() {
     delay(500);
     UserIO::setLED(LED_PURPLE, LED_OFF, 0, 0);
 
-    // Test NeoPixel colors
+    // Test NeoPixel colors (setSystemStatus calls show() internally)
     Serial.println(F("  - NeoPixel RED"));
     UserIO::setSystemStatus(STATUS_ERROR);
-    UserIO::update();
     delay(500);
 
     Serial.println(F("  - NeoPixel GREEN"));
     UserIO::setSystemStatus(STATUS_OK);
-    UserIO::update();
     delay(500);
 
     Serial.println(F("  - NeoPixel BLUE"));
     UserIO::setSystemStatus(STATUS_BUSY);
-    UserIO::update();
     delay(500);
 
     Serial.println(F("  - NeoPixel YELLOW"));
     UserIO::setSystemStatus(STATUS_WARNING);
-    UserIO::update();
     delay(500);
 
     Serial.println(F("  - NeoPixel OFF"));
-    UserIO::setSystemStatus(STATUS_OK);
-    UserIO::update();
+    UserIO::setNeoPixelColor(0, 0, 0);
 
     Serial.println();
     Serial.println(F("[Demo] LED test complete!"));
@@ -160,7 +158,11 @@ void setup() {
 // ============================================================================
 
 void loop() {
-    // Update UserIO (handles button debouncing, LED animations)
+    // Read button GPIOs directly — in production this is called from the
+    // TIMER1 ISR at 100 Hz, but this test sketch has no ISR/Scheduler running.
+    UserIO::readButtons();
+
+    // Update UserIO (handles LED animations, limit switches, NeoPixel)
     UserIO::update();
 
     // Handle button presses for interactive test
@@ -185,6 +187,23 @@ void handleButtons() {
     bool btnPressed[10];
     for (uint8_t i = 0; i < 10; i++) {
         btnPressed[i] = UserIO::isButtonPressed(i);
+    }
+
+    // Direct immediate print on any button state change (press or release).
+    // Buttons 3-10 share pins with limit switches LIM1-8 — pressing them
+    // shows up here as a button AND in the limit switch status: this is
+    // intentional (shared-pin feature, both views are always valid).
+    for (uint8_t i = 0; i < 10; i++) {
+        if (btnPressed[i] != btnWasPressed[i]) {
+            Serial.print(F("[BTN"));
+            Serial.print(i + 1);
+            if (i >= 2) {               // buttons 3-10 share LIM1-8
+                Serial.print(F("/LIM"));
+                Serial.print(i - 1);   // BTN3=LIM1 … BTN10=LIM8
+            }
+            Serial.print(F("] "));
+            Serial.println(btnPressed[i] ? F("PRESSED") : F("released"));
+        }
     }
 
     // BTN1-5: Toggle corresponding LED
@@ -380,15 +399,25 @@ void printStatus() {
     Serial.println(F("User I/O Status:"));
     Serial.println();
 
-    // Button states (all 10 buttons)
-    Serial.println(F("  Buttons:"));
+    // Button + limit switch states (buttons 3-10 share pins with LIM1-8)
+    Serial.println(F("  Buttons / Limit switches:"));
     uint16_t buttonStates = UserIO::getButtonStates();
+    uint8_t  limitStates  = UserIO::getLimitStates();
     for (uint8_t i = 0; i < 10; i++) {
+        bool pressed = (buttonStates & (1u << i)) != 0;
         Serial.print(F("    BTN"));
         if (i < 9) Serial.print(F(" "));
         Serial.print(i + 1);
-        Serial.print(F(": "));
-        Serial.println((buttonStates & (1 << i)) ? F("PRESSED") : F("Released"));
+        if (i >= 2) {                   // shared with LIM1-8
+            Serial.print(F(" / LIM"));
+            Serial.print(i - 1);
+            bool lim = (limitStates & (1u << (i - 2))) != 0;
+            Serial.print(pressed ? F(": PRESSED") : F(": Released"));
+            Serial.print(F("  LIM="));
+            Serial.println(lim ? F("triggered") : F("clear"));
+        } else {
+            Serial.println(pressed ? F(": PRESSED") : F(": Released"));
+        }
     }
 
     Serial.println();

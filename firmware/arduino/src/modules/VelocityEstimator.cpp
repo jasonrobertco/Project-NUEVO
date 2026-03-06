@@ -19,6 +19,7 @@ EdgeTimeVelocityEstimator::EdgeTimeVelocityEstimator()
     , filterSize_(4)
     , filterIndex_(0)
     , filterCount_(0)
+    , initialized_(false)
 {
     memset(filterBuffer_, 0, sizeof(filterBuffer_));
 }
@@ -30,55 +31,76 @@ void EdgeTimeVelocityEstimator::init(uint16_t countsPerRev) {
 
 void EdgeTimeVelocityEstimator::reset() {
     prevCount_ = 0;
-    prevEdgeUs_ = micros();
+    prevEdgeUs_ = 0;       // 0 = sentinel: no baseline captured yet
+    initialized_ = false;
     velocity_ = 0.0f;
     filterIndex_ = 0;
     filterCount_ = 0;
     memset(filterBuffer_, 0, sizeof(filterBuffer_));
 }
 
-void EdgeTimeVelocityEstimator::update(uint32_t currentUs, int32_t currentCount) {
-    // Check for zero velocity timeout
-    uint32_t timeSinceLastEdgeUs = currentUs - prevEdgeUs_;
+void EdgeTimeVelocityEstimator::update(uint32_t lastEdgeUs, int32_t currentCount) {
+    // -----------------------------------------------------------------------
+    // Timeout check: use micros() (current wall-clock time) vs lastEdgeUs
+    // (timestamp of the most recent encoder edge).
+    //
+    // Bug that was here: old code did `lastEdgeUs - prevEdgeUs_` which
+    // computes time *between* edges (= 1/frequency), not time *since* last
+    // edge. At low speed the edge gap easily exceeds the 50ms timeout even
+    // while the motor is moving → false zero velocity.
+    //
+    // lastEdgeUs == 0 means no edges have arrived since reset — skip check.
+    // -----------------------------------------------------------------------
+    if (lastEdgeUs != 0) {
+        uint32_t timeSinceLastEdgeUs = micros() - lastEdgeUs;
+        if (timeSinceLastEdgeUs > (uint32_t)zeroTimeoutMs_ * 1000UL) {
+            // Motor has stopped — clear filter and reset baseline so the
+            // next edge gives a clean start (Bug 3 fix: update prevEdgeUs_
+            // so we don't get stuck firing the timeout on every call).
+            velocity_ = 0.0f;
+            filterIndex_ = 0;
+            filterCount_ = 0;
+            memset(filterBuffer_, 0, sizeof(filterBuffer_));
+            initialized_ = false;
+            prevCount_  = currentCount;
+            prevEdgeUs_ = lastEdgeUs;
+            return;
+        }
+    }
 
-    if (timeSinceLastEdgeUs > (zeroTimeoutMs_ * 1000UL)) {
-        // No encoder edges for timeout period → velocity is zero
-        velocity_ = 0.0f;
-        addFilterSample(0.0f);
+    // -----------------------------------------------------------------------
+    // First call after reset or timeout: capture baseline, don't compute.
+    // (Bug 2 fix: old reset() set prevEdgeUs_ = micros() and prevCount_ = 0,
+    // causing a huge deltaCount spike and/or an immediate timeout on the
+    // first real edge.)
+    // -----------------------------------------------------------------------
+    if (!initialized_) {
+        prevCount_   = currentCount;
+        prevEdgeUs_  = lastEdgeUs;
+        initialized_ = (lastEdgeUs != 0);  // wait for at least one real edge
         return;
     }
 
-    // Check if encoder count changed
+    // No new edges since last update — keep previous velocity estimate
     int32_t deltaCount = currentCount - prevCount_;
-
     if (deltaCount == 0) {
-        // No movement since last update
-        // Keep previous velocity estimate (don't add to filter yet)
         return;
     }
 
-    // Compute time between edges
-    uint32_t deltaTimeUs = currentUs - prevEdgeUs_;
-
+    // Time span covered by the new edges
+    uint32_t deltaTimeUs = lastEdgeUs - prevEdgeUs_;
     if (deltaTimeUs == 0) {
-        // Avoid division by zero (shouldn't happen in practice)
-        return;
+        return;  // Shouldn't happen; guard against divide-by-zero
     }
 
-    // Compute instantaneous velocity: ticks/microsecond → ticks/second
-    // velocity = deltaCount / (deltaTimeUs / 1000000)
-    //          = (deltaCount * 1000000) / deltaTimeUs
+    // Instantaneous velocity in ticks/second
     float instantVelocity = (float)deltaCount * 1000000.0f / (float)deltaTimeUs;
 
-    // Add to moving average filter
     addFilterSample(instantVelocity);
-
-    // Get filtered velocity
     velocity_ = getFilteredVelocity();
 
-    // Update previous values for next iteration
-    prevCount_ = currentCount;
-    prevEdgeUs_ = currentUs;
+    prevCount_  = currentCount;
+    prevEdgeUs_ = lastEdgeUs;
 }
 
 float EdgeTimeVelocityEstimator::getVelocity() const {

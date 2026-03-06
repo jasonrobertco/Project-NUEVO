@@ -23,8 +23,10 @@ LidarDriver      SensorManager::lidars_[SENSOR_MAX_LIDARS];
 UltrasonicDriver SensorManager::ultrasonics_[SENSOR_MAX_ULTRASONICS];
 uint8_t          SensorManager::lidarCount_        = 0;
 uint8_t          SensorManager::ultrasonicCount_   = 0;
-uint16_t         SensorManager::lidarDistMm_[SENSOR_MAX_LIDARS]           = {};
-uint16_t         SensorManager::ultrasonicDistMm_[SENSOR_MAX_ULTRASONICS] = {};
+bool             SensorManager::lidarFound_[SENSOR_MAX_LIDARS]             = {};
+bool             SensorManager::ultrasonicFound_[SENSOR_MAX_ULTRASONICS]   = {};
+uint16_t         SensorManager::lidarDistMm_[SENSOR_MAX_LIDARS]            = {};
+uint16_t         SensorManager::ultrasonicDistMm_[SENSOR_MAX_ULTRASONICS]  = {};
 
 float   SensorManager::batteryVoltage_   = 0.0f;
 float   SensorManager::rail5VVoltage_    = 0.0f;
@@ -93,28 +95,44 @@ void SensorManager::init() {
 #if LIDAR_COUNT > 0
     lidarCount_ = 0;
     for (uint8_t i = 0; i < LIDAR_COUNT && i < SENSOR_MAX_LIDARS; i++) {
-        if (lidars_[i].init(kLidarAddrs[i])) {
+        lidarFound_[i] = lidars_[i].init(kLidarAddrs[i]);
+        if (lidarFound_[i]) {
             lidarCount_++;
         }
-    }
 #ifdef DEBUG_SENSOR
-    DEBUG_SERIAL.print(F("[SensorManager] Lidar sensors: "));
-    DEBUG_SERIAL.println(lidarCount_);
+        if (lidarFound_[i]) {
+            DEBUG_SERIAL.print(F("[SensorManager] Lidar "));
+            DEBUG_SERIAL.print(i);
+            DEBUG_SERIAL.println(F(": OK"));
+        } else {
+            DEBUG_SERIAL.print(F("[SensorManager] WARNING: Lidar "));
+            DEBUG_SERIAL.print(i);
+            DEBUG_SERIAL.println(F(" not detected (configured but missing)"));
+        }
 #endif
+    }
 #endif
 
     // --- Ultrasonic sensors ---
 #if ULTRASONIC_COUNT > 0
     ultrasonicCount_ = 0;
     for (uint8_t i = 0; i < ULTRASONIC_COUNT && i < SENSOR_MAX_ULTRASONICS; i++) {
-        if (ultrasonics_[i].init(kUltrasonicAddrs[i])) {
+        ultrasonicFound_[i] = ultrasonics_[i].init(kUltrasonicAddrs[i]);
+        if (ultrasonicFound_[i]) {
             ultrasonicCount_++;
         }
-    }
 #ifdef DEBUG_SENSOR
-    DEBUG_SERIAL.print(F("[SensorManager] Ultrasonic sensors: "));
-    DEBUG_SERIAL.println(ultrasonicCount_);
+        if (ultrasonicFound_[i]) {
+            DEBUG_SERIAL.print(F("[SensorManager] Ultrasonic "));
+            DEBUG_SERIAL.print(i);
+            DEBUG_SERIAL.println(F(": OK"));
+        } else {
+            DEBUG_SERIAL.print(F("[SensorManager] WARNING: Ultrasonic "));
+            DEBUG_SERIAL.print(i);
+            DEBUG_SERIAL.println(F(" not detected (configured but missing)"));
+        }
 #endif
+    }
 #endif
 
     lastImuMicros_ = micros();
@@ -217,8 +235,10 @@ void SensorManager::update100Hz() {
 // ============================================================================
 
 void SensorManager::update50Hz() {
-    for (uint8_t i = 0; i < lidarCount_ && i < SENSOR_MAX_LIDARS; i++) {
-        lidarDistMm_[i] = lidars_[i].getDistanceMm();
+    for (uint8_t i = 0; i < LIDAR_COUNT && i < SENSOR_MAX_LIDARS; i++) {
+        if (lidarFound_[i]) {
+            lidarDistMm_[i] = lidars_[i].getDistanceMm();
+        }
     }
 }
 
@@ -229,8 +249,10 @@ void SensorManager::update50Hz() {
 void SensorManager::update10Hz() {
     updateVoltages();
 
-    for (uint8_t i = 0; i < ultrasonicCount_ && i < SENSOR_MAX_ULTRASONICS; i++) {
-        ultrasonicDistMm_[i] = ultrasonics_[i].getDistanceMm();
+    for (uint8_t i = 0; i < ULTRASONIC_COUNT && i < SENSOR_MAX_ULTRASONICS; i++) {
+        if (ultrasonicFound_[i]) {
+            ultrasonicDistMm_[i] = ultrasonics_[i].getDistanceMm();
+        }
     }
 }
 
@@ -260,13 +282,26 @@ int16_t SensorManager::getRawMagZ() { return imu_.getRawMagZ(); }
 // RANGE SENSOR OUTPUT
 // ============================================================================
 
+bool SensorManager::isLidarFound(uint8_t idx) {
+    if (idx >= SENSOR_MAX_LIDARS) return false;
+    return lidarFound_[idx];
+}
+
+bool SensorManager::isUltrasonicFound(uint8_t idx) {
+    if (idx >= SENSOR_MAX_ULTRASONICS) return false;
+    return ultrasonicFound_[idx];
+}
+
+uint8_t SensorManager::getLidarConfiguredCount()      { return LIDAR_COUNT; }
+uint8_t SensorManager::getUltrasonicConfiguredCount() { return ULTRASONIC_COUNT; }
+
 uint16_t SensorManager::getLidarDistanceMm(uint8_t idx) {
-    if (idx >= lidarCount_) return 0;
+    if (idx >= SENSOR_MAX_LIDARS || !lidarFound_[idx]) return 0;
     return lidarDistMm_[idx];
 }
 
 uint16_t SensorManager::getUltrasonicDistanceMm(uint8_t idx) {
-    if (idx >= ultrasonicCount_) return 0;
+    if (idx >= SENSOR_MAX_ULTRASONICS || !ultrasonicFound_[idx]) return 0;
     return ultrasonicDistMm_[idx];
 }
 

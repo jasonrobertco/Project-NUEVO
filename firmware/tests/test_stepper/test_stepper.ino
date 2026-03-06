@@ -136,7 +136,6 @@ void setup() {
         stepper3->setAcceleration(500);
         Serial.println(F("  - Stepper 3: Initialized"));
     }
-#endif
 
     Serial.println();
     Serial.println(F("[Setup] Initialization complete!"));
@@ -203,6 +202,12 @@ void executeCommand(const char* cmd) {
     if (strcmp(cmd, "S") == 0) {
         Serial.println(F(">>> Emergency stop ALL steppers"));
         StepperManager::emergencyStopAll();
+        return;
+    }
+
+    // Read limit switch states
+    if (strcmp(cmd, "L") == 0) {
+        printLimitSwitches();
         return;
     }
 
@@ -298,10 +303,17 @@ void executeCommand(const char* cmd) {
 
         case 'h': // Home
             if (parsed >= 2 && (value1 == 1 || value1 == -1)) {
-                Serial.print(F(">>> Home stepper "));
+                Serial.print(F(">>> Homing stepper "));
                 Serial.print(stepperId);
-                Serial.print(F(" in direction "));
-                Serial.println(value1);
+                Serial.print(F(" dir="));
+                Serial.print(value1);
+                Serial.print(F(" speed="));
+                Serial.print(stepper->getMaxVelocity() / 4);
+                Serial.println(F(" steps/sec"));
+#if !defined(PIN_ST1_LIMIT) && !defined(PIN_ST2_LIMIT) && \
+    !defined(PIN_ST3_LIMIT) && !defined(PIN_ST4_LIMIT)
+                Serial.println(F("WARNING: No limit pins defined — homing will not run"));
+#endif
                 stepper->home((int8_t)value1);
             } else {
                 Serial.println(F("ERROR: Format: h<id>,<dir> (dir: 1 or -1)"));
@@ -362,6 +374,9 @@ void printStatus() {
                 break;
             case STEPPER_HOMING:
                 Serial.print(F("[HOMING]  "));
+                Serial.print(F("speed="));
+                Serial.print(stepper->getMaxVelocity() / 4);
+                Serial.print(F(" steps/sec  "));
                 break;
             case STEPPER_FAULT:
                 Serial.print(F("[FAULT]   "));
@@ -393,6 +408,43 @@ void printStatus() {
     Serial.println(F("----------------------------------------"));
 }
 
+void printLimitSwitches() {
+    uint8_t activeState = LIMIT_ACTIVE_LOW ? LOW : HIGH;
+    Serial.println(F("Limit switch states:"));
+#if defined(PIN_ST1_LIMIT)
+    Serial.print(F("  ST1 (pin "));
+    Serial.print(PIN_ST1_LIMIT);
+    Serial.print(F("): "));
+    Serial.println(digitalRead(PIN_ST1_LIMIT) == activeState ? F("TRIGGERED") : F("open"));
+#else
+    Serial.println(F("  ST1: not configured"));
+#endif
+#if defined(PIN_ST2_LIMIT)
+    Serial.print(F("  ST2 (pin "));
+    Serial.print(PIN_ST2_LIMIT);
+    Serial.print(F("): "));
+    Serial.println(digitalRead(PIN_ST2_LIMIT) == activeState ? F("TRIGGERED") : F("open"));
+#else
+    Serial.println(F("  ST2: not configured"));
+#endif
+#if defined(PIN_ST3_LIMIT)
+    Serial.print(F("  ST3 (pin "));
+    Serial.print(PIN_ST3_LIMIT);
+    Serial.print(F("): "));
+    Serial.println(digitalRead(PIN_ST3_LIMIT) == activeState ? F("TRIGGERED") : F("open"));
+#else
+    Serial.println(F("  ST3: not configured"));
+#endif
+#if defined(PIN_ST4_LIMIT)
+    Serial.print(F("  ST4 (pin "));
+    Serial.print(PIN_ST4_LIMIT);
+    Serial.print(F("): "));
+    Serial.println(digitalRead(PIN_ST4_LIMIT) == activeState ? F("TRIGGERED") : F("open"));
+#else
+    Serial.println(F("  ST4: not configured"));
+#endif
+}
+
 void printHelp() {
     Serial.println();
     Serial.println(F("========================================"));
@@ -411,16 +463,26 @@ void printHelp() {
     Serial.println();
     Serial.println(F("Info:"));
     Serial.println(F("  ?              - Print status (auto every 2s)"));
+    Serial.println(F("  L              - Read all limit switch states"));
     Serial.println(F("  help           - Show this help"));
     Serial.println();
     Serial.println(F("Examples:"));
     Serial.println(F("  e0             - Enable stepper 0"));
     Serial.println(F("  v0,500         - Set stepper 0 to 500 steps/sec"));
-    Serial.println(F("  a0,300         - Set stepper 0 to 300 steps/sec²"));
+    Serial.println(F("  a0,300         - Set stepper 0 to 300 steps/sec^2"));
     Serial.println(F("  m0,200         - Move stepper 0 forward 200 steps"));
     Serial.println(F("  m0,-200        - Move stepper 0 backward 200 steps"));
     Serial.println(F("  p0,0           - Return stepper 0 to position 0"));
-    Serial.println(F("  h0,1           - Home stepper 0 (positive direction)"));
+    Serial.println(F("  h0,-1          - Home stepper 0 (negative dir, toward limit)"));
+    Serial.println();
+    Serial.println(F("Homing test sequence:"));
+    Serial.println(F("  1. L           - Verify limit switch reads 'open'"));
+    Serial.println(F("  2. e0          - Enable stepper 0"));
+    Serial.println(F("  3. v0,400      - Set velocity (homing runs at v/4 = 100 steps/sec)"));
+    Serial.println(F("  4. h0,-1       - Start homing toward limit switch"));
+    Serial.println(F("  5. L           - While running: manually trigger switch to confirm"));
+    Serial.println(F("  6. ?           - Confirm state=IDLE and position=0 after homing"));
+    Serial.println(F("  7. m0,200      - Move away from home to verify position tracking"));
     Serial.println(F("========================================"));
     Serial.println();
 }

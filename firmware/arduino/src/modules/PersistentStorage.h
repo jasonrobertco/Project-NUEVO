@@ -11,13 +11,12 @@
  * modules that need persistent data should use this API instead of calling
  * EEPROM.put() / EEPROM.get() directly.
  *
- * EEPROM Layout (v1 — 36 bytes total, starting at address 0):
+ * EEPROM Layout (v1 — 32 bytes total, starting at address 0):
  * ─────────────────────────────────────────────────────────────
  *  Byte  0– 3  magic        uint32_t   0xDEAD2026 when layout is valid
  *  Byte  4     version      uint8_t    Layout version (currently 1)
  *  Byte  5– 7  reserved     uint8_t×3  Set to 0
- *  Byte  8–11  wheelDiamMm  float      Wheel diameter in mm (0 = not saved)
- *  Byte 12–15  wheelBaseMm  float      Wheel base in mm (0 = not saved)
+ *  Byte  8–15  (reserved)              Unused (formerly wheel geometry)
  *  Byte 16     magCalValid  uint8_t    1 = valid mag calibration stored
  *  Byte 17–19  reserved     uint8_t×3  Set to 0
  *  Byte 20–23  magOffsetX   float      Mag hard-iron offset X (µT)
@@ -25,15 +24,11 @@
  *  Byte 28–31  magOffsetZ   float      Mag hard-iron offset Z (µT)
  * ─────────────────────────────────────────────────────────────
  *
+ * Wheel geometry is no longer stored in EEPROM. Edit WHEEL_DIAMETER_MM and
+ * WHEEL_BASE_MM in RobotKinematics.h to match your robot's physical dimensions.
+ *
  * Usage:
- *   PersistentStorage::init();         // call once in setup()
- *
- *   // Write
- *   PersistentStorage::setWheelDiameter(65.0f);
- *
- *   // Read
- *   float d;
- *   if (PersistentStorage::getWheelDiameter(d)) { ... }
+ *   PersistentStorage::init();   // call once in setup()
  *
  *   // Erase everything
  *   PersistentStorage::reset();
@@ -60,8 +55,7 @@
 #define PS_OFF_MAGIC        0   // uint32_t
 #define PS_OFF_VERSION      4   // uint8_t
 // 3 bytes reserved at 5–7
-#define PS_OFF_WHEEL_DIAM   8   // float
-#define PS_OFF_WHEEL_BASE   12  // float
+// 8 bytes reserved at 8–15 (formerly wheel geometry — now defined in RobotKinematics.h)
 #define PS_OFF_MAG_VALID    16  // uint8_t
 // 3 bytes reserved at 17–19
 #define PS_OFF_MAG_X        20  // float
@@ -104,36 +98,6 @@ public:
      * @brief Returns the stored layout version number
      */
     static uint8_t getVersion();
-
-    // ========================================================================
-    // WHEEL GEOMETRY
-    // ========================================================================
-
-    /**
-     * @brief Load wheel diameter from EEPROM
-     * @param mm Output — wheel diameter in millimetres
-     * @return False if no value has been saved yet (mm unchanged)
-     */
-    static bool getWheelDiameter(float& mm);
-
-    /**
-     * @brief Persist wheel diameter to EEPROM
-     * @param mm Wheel diameter in millimetres
-     */
-    static void setWheelDiameter(float mm);
-
-    /**
-     * @brief Load wheel base from EEPROM
-     * @param mm Output — wheel base (centre-to-centre) in millimetres
-     * @return False if no value has been saved yet (mm unchanged)
-     */
-    static bool getWheelBase(float& mm);
-
-    /**
-     * @brief Persist wheel base to EEPROM
-     * @param mm Wheel base in millimetres
-     */
-    static void setWheelBase(float mm);
 
     // ========================================================================
     // MAGNETOMETER CALIBRATION

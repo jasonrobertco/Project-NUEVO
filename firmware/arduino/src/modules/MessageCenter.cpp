@@ -14,6 +14,7 @@
  */
 
 #include "MessageCenter.h"
+#include "RobotKinematics.h"
 #include "SensorManager.h"
 #include "UserIO.h"
 #include "../SystemManager.h"
@@ -41,16 +42,8 @@ uint32_t    MessageCenter::lastCmdMs_         = 0;
 bool        MessageCenter::heartbeatValid_    = false;
 uint16_t    MessageCenter::heartbeatTimeoutMs_ = HEARTBEAT_TIMEOUT_MS;
 
-float       MessageCenter::wheelDiameterMm_  = DEFAULT_WHEEL_DIAMETER_MM;
-float       MessageCenter::wheelBaseMm_      = DEFAULT_WHEEL_BASE_MM;
 uint8_t     MessageCenter::motorDirMask_     = 0;
 uint8_t     MessageCenter::neoPixelCount_    = NEOPIXEL_COUNT;
-
-float       MessageCenter::odomX_           = 0.0f;
-float       MessageCenter::odomY_           = 0.0f;
-float       MessageCenter::odomTheta_       = 0.0f;
-int32_t     MessageCenter::prevLeftTicks_   = 0;
-int32_t     MessageCenter::prevRightTicks_  = 0;
 
 uint16_t    MessageCenter::servoEnabledMask_ = 0;
 uint16_t    MessageCenter::loopTimeAvgUs_    = 0;
@@ -66,6 +59,8 @@ uint32_t    MessageCenter::lastVoltageSendMs_     = 0;
 uint32_t    MessageCenter::lastIOStatusSendMs_    = 0;
 uint32_t    MessageCenter::lastStatusSendMs_      = 0;
 uint32_t    MessageCenter::lastMagCalSendMs_      = 0;
+uint32_t    MessageCenter::lastLidarSendMs_       = 0;
+uint32_t    MessageCenter::lastUltrasonicSendMs_  = 0;
 
 bool        MessageCenter::pendingMagCal_ = false;
 bool        MessageCenter::initialized_  = false;
@@ -92,6 +87,7 @@ void MessageCenter::init() {
     lastCmdMs_       = millis();
     heartbeatValid_  = false;
     pendingMagCal_   = false;
+    RobotKinematics::reset(0, 0);
     SystemManager::requestTransition(SYS_STATE_IDLE);
 
     initialized_ = true;
@@ -182,11 +178,25 @@ void MessageCenter::sendTelemetry() {
             sendSensorIMU();
         }
 
+        // Lidar range at 50 Hz (each configured slot, found or not)
+        if (SensorManager::getLidarConfiguredCount() > 0 &&
+            currentMs - lastLidarSendMs_ >= 20) {
+            lastLidarSendMs_ = currentMs;
+            sendSensorRange(true);
+        }
+
         // ---- 50 Hz telemetry ----
         if (currentMs - lastServoStatusSendMs_ >= 20) {
             lastServoStatusSendMs_ = currentMs;
             sendServoStatusAll();
         }
+    }
+
+    // Ultrasonic range at 10 Hz (each configured slot, found or not)
+    if (running && SensorManager::getUltrasonicConfiguredCount() > 0 &&
+        currentMs - lastUltrasonicSendMs_ >= 100) {
+        lastUltrasonicSendMs_ = currentMs;
+        sendSensorRange(false);
     }
 
     // ---- 10 Hz voltage (RUNNING or ERROR) ----
@@ -469,12 +479,6 @@ void MessageCenter::handleSysCmd(const PayloadSysCmd* payload) {
 
 void MessageCenter::handleSysConfig(const PayloadSysConfig* payload) {
     // IDLE state only — enforced by routeMessage()
-    if (payload->wheelDiameterMm != 0.0f)
-        wheelDiameterMm_ = payload->wheelDiameterMm;
-
-    if (payload->wheelBaseMm != 0.0f)
-        wheelBaseMm_ = payload->wheelBaseMm;
-
     if (payload->neoPixelCount != 0)
         neoPixelCount_ = payload->neoPixelCount;
 
@@ -488,7 +492,9 @@ void MessageCenter::handleSysConfig(const PayloadSysConfig* payload) {
     }
 
     if (payload->resetOdometry) {
-        resetOdometry();
+        RobotKinematics::reset(
+            dcMotors[ODOM_LEFT_MOTOR].getPosition(),
+            dcMotors[ODOM_RIGHT_MOTOR].getPosition());
     }
 }
 
@@ -732,8 +738,8 @@ void MessageCenter::sendStepStatusAll() {
 void MessageCenter::sendServoStatusAll() {
     PayloadServoStatusAll payload;
 
-    payload.pca9685Connected = 1;  // Assumed connected when SERVO_CONTROLLER_ENABLED
-    payload.pca9685Error     = 0;
+    payload.pca9685Connected = ServoController::isInitialized() ? 1 : 0;
+    payload.pca9685Error     = ServoController::getLastI2CError();
     payload.enabledMask      = servoEnabledMask_;
 
     for (uint8_t i = 0; i < 16; i++) {
@@ -774,36 +780,60 @@ void MessageCenter::sendSensorIMU() {
     addTlvPacket(&encodeDesc_, SENSOR_IMU, sizeof(payload), &payload);
 }
 
+void MessageCenter::sendSensorRange(bool lidarOnly) {
+    if (lidarOnly) {
+        // Lidar sensors (50 Hz path)
+        for (uint8_t i = 0; i < SensorManager::getLidarConfiguredCount(); i++) {
+            PayloadSensorRange p;
+            p.sensorId   = i;
+            p.sensorType = 1;   // lidar
+            p.reserved   = 0;
+            p.reserved2  = 0;
+            p.timestamp  = micros();
+            if (SensorManager::isLidarFound(i)) {
+                p.status     = 0;   // valid
+                p.distanceMm = SensorManager::getLidarDistanceMm(i);
+            } else {
+                p.status     = 3;   // not installed
+                p.distanceMm = 0;
+            }
+            addTlvPacket(&encodeDesc_, SENSOR_RANGE, sizeof(p), &p);
+        }
+    } else {
+        // Ultrasonic sensors (10 Hz path)
+        for (uint8_t i = 0; i < SensorManager::getUltrasonicConfiguredCount(); i++) {
+            PayloadSensorRange p;
+            p.sensorId   = i;
+            p.sensorType = 0;   // ultrasonic
+            p.reserved   = 0;
+            p.reserved2  = 0;
+            p.timestamp  = micros();
+            if (SensorManager::isUltrasonicFound(i)) {
+                p.status     = 0;   // valid
+                p.distanceMm = SensorManager::getUltrasonicDistanceMm(i);
+            } else {
+                p.status     = 3;   // not installed
+                p.distanceMm = 0;
+            }
+            addTlvPacket(&encodeDesc_, SENSOR_RANGE, sizeof(p), &p);
+        }
+    }
+}
+
 void MessageCenter::sendSensorKinematics() {
-    updateOdometry();
+    RobotKinematics::update(
+        dcMotors[ODOM_LEFT_MOTOR].getPosition(),
+        dcMotors[ODOM_RIGHT_MOTOR].getPosition(),
+        dcMotors[ODOM_LEFT_MOTOR].getVelocity(),
+        dcMotors[ODOM_RIGHT_MOTOR].getVelocity());
 
     PayloadSensorKinematics payload;
-    payload.x     = odomX_;
-    payload.y     = odomY_;
-    payload.theta = odomTheta_;
-
-    // Instantaneous velocities in mm/s (from motor velocity estimates)
-    if (wheelDiameterMm_ > 0.0f) {
-        static const uint8_t kEncModes[4] = {
-            ENCODER_1_MODE, ENCODER_2_MODE, ENCODER_3_MODE, ENCODER_4_MODE
-        };
-        const float mmPerTickL =
-            (PI * wheelDiameterMm_) / (float)(ENCODER_PPR * kEncModes[ODOM_LEFT_MOTOR]);
-        const float mmPerTickR =
-            (PI * wheelDiameterMm_) / (float)(ENCODER_PPR * kEncModes[ODOM_RIGHT_MOTOR]);
-
-        float vLeft  = dcMotors[ODOM_LEFT_MOTOR].getVelocity() * mmPerTickL;
-        float vRight = dcMotors[ODOM_RIGHT_MOTOR].getVelocity() * mmPerTickR;
-
-        payload.vx     = (vLeft + vRight) * 0.5f;
-        payload.vy     = 0.0f;  // Always 0 for differential drive
-        payload.vTheta = (wheelBaseMm_ > 0.0f)
-                         ? (vRight - vLeft) / wheelBaseMm_
-                         : 0.0f;
-    } else {
-        payload.vx = payload.vy = payload.vTheta = 0.0f;
-    }
-
+    payload.x      = RobotKinematics::getX();
+    payload.y      = RobotKinematics::getY();
+    payload.theta  = RobotKinematics::getTheta();
+    payload.vx     = RobotKinematics::getVx();
+    payload.vy     = RobotKinematics::getVy();
+    payload.vTheta = RobotKinematics::getVTheta();
     payload.timestamp = micros();
 
     addTlvPacket(&encodeDesc_, SENSOR_KINEMATICS, sizeof(payload), &payload);
@@ -859,6 +889,10 @@ void MessageCenter::sendSystemStatus() {
     if (SensorManager::isBatteryLow())        payload.errorFlags |= ERR_UNDERVOLTAGE;
     if (SensorManager::isBatteryOvervoltage()) payload.errorFlags |= ERR_OVERVOLTAGE;
     if (!heartbeatValid_)                      payload.errorFlags |= ERR_LIVENESS_LOST;
+    if (ServoController::hasI2CError())        payload.errorFlags |= ERR_I2C_ERROR;
+#if IMU_ENABLED
+    if (!SensorManager::isIMUAvailable())      payload.errorFlags |= ERR_IMU_ERROR;
+#endif
 
     // Attached sensors bitmask: bit0=IMU, bit1=Lidar, bit2=Ultrasonic
     if (SensorManager::isIMUAvailable())           payload.attachedSensors |= 0x01;
@@ -869,8 +903,6 @@ void MessageCenter::sendSystemStatus() {
     payload.loopTimeAvgUs    = loopTimeAvgUs_;
     payload.loopTimeMaxUs    = loopTimeMaxUs_;
     payload.uartRxErrors     = uartRxErrors_;
-    payload.wheelDiameterMm  = wheelDiameterMm_;
-    payload.wheelBaseMm      = wheelBaseMm_;
     payload.motorDirMask     = motorDirMask_;
     payload.neoPixelCount    = neoPixelCount_;
     payload.heartbeatTimeoutMs = heartbeatTimeoutMs_;
@@ -919,49 +951,6 @@ void MessageCenter::disableAllActuators() {
     servoEnabledMask_ = 0;
 }
 
-void MessageCenter::updateOdometry() {
-    // Requires wheel geometry to be configured
-    if (wheelDiameterMm_ <= 0.0f || wheelBaseMm_ <= 0.0f) return;
-
-    // Encoder modes indexed by motor ID — resolves automatically with ODOM_*_MOTOR config
-    static const uint8_t kEncModes[4] = {
-        ENCODER_1_MODE, ENCODER_2_MODE, ENCODER_3_MODE, ENCODER_4_MODE
-    };
-
-    int32_t leftTicks  = dcMotors[ODOM_LEFT_MOTOR].getPosition();
-    int32_t rightTicks = dcMotors[ODOM_RIGHT_MOTOR].getPosition();
-
-    int32_t dL = leftTicks  - prevLeftTicks_;
-    int32_t dR = rightTicks - prevRightTicks_;
-    prevLeftTicks_  = leftTicks;
-    prevRightTicks_ = rightTicks;
-
-    if (dL == 0 && dR == 0) return;  // No movement, skip trig
-
-    const float mmPerTickL =
-        (PI * wheelDiameterMm_) / (float)(ENCODER_PPR * kEncModes[ODOM_LEFT_MOTOR]);
-    const float mmPerTickR =
-        (PI * wheelDiameterMm_) / (float)(ENCODER_PPR * kEncModes[ODOM_RIGHT_MOTOR]);
-
-    float dLeft   = (float)dL * mmPerTickL;
-    float dRight  = (float)dR * mmPerTickR;
-    float dCenter = (dLeft + dRight) * 0.5f;
-    float dTheta  = (dRight - dLeft) / wheelBaseMm_;
-
-    // Midpoint heading for integration (reduces discretization error)
-    float headingMid = odomTheta_ + dTheta * 0.5f;
-    odomX_     += dCenter * cosf(headingMid);
-    odomY_     += dCenter * sinf(headingMid);
-    odomTheta_ += dTheta;
-}
-
-void MessageCenter::resetOdometry() {
-    odomX_     = 0.0f;
-    odomY_     = 0.0f;
-    odomTheta_ = 0.0f;
-    prevLeftTicks_  = dcMotors[ODOM_LEFT_MOTOR].getPosition();
-    prevRightTicks_ = dcMotors[ODOM_RIGHT_MOTOR].getPosition();
-}
 
 uint16_t MessageCenter::getFreeRAM() {
     extern int __heap_start, *__brkval;

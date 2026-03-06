@@ -55,7 +55,7 @@
 // ENCODER CONFIGURATION
 // ============================================================================
 
-#define ENCODER_PPR             1440    // Pulses per revolution (manufacturer spec)
+#define ENCODER_PPR             1440    // Pulses per revolution (manufacturer spec, for encoder_4x)
 #define ENCODER_MAX_RPM         100     // Maximum expected motor RPM
 
 // Encoder resolution modes
@@ -70,27 +70,10 @@
 
 // Encoder direction inversion (polarity correction)
 // Set to 1 to invert encoder count direction (flips positive/negative)
-#define ENCODER_1_DIR_INVERTED  1       // 0=normal, 1=inverted
-#define ENCODER_2_DIR_INVERTED  1       // 0=normal, 1=inverted
+#define ENCODER_1_DIR_INVERTED  0       // 0=normal, 1=inverted
+#define ENCODER_2_DIR_INVERTED  0       // 0=normal, 1=inverted
 #define ENCODER_3_DIR_INVERTED  1       // 0=normal, 1=inverted
 #define ENCODER_4_DIR_INVERTED  1       // 0=normal, 1=inverted
-
-// ============================================================================
-// DIFFERENTIAL DRIVE — WHEEL GEOMETRY AND MOTOR ASSIGNMENT
-// ============================================================================
-
-// Which DC motor index drives the left and right wheels.
-// Must be in range 0 to NUM_DC_MOTORS-1, and must be different from each other.
-// Positive encoder ticks for each wheel must mean "wheel moving forward".
-// If the count direction is wrong, set the corresponding ENCODER_N_DIR_INVERTED above.
-#define ODOM_LEFT_MOTOR             DC_MOTOR_1       // DC motor index for the left drive wheel (0-3)
-#define ODOM_RIGHT_MOTOR            DC_MOTOR_2       // DC motor index for the right drive wheel (0-3)
-
-// Default wheel geometry — loaded at boot before SYS_CONFIG arrives from the RPi.
-// Set either value to 0.0f to disable odometry until SYS_CONFIG is received.
-// Both values can be overridden at runtime via the SYS_CONFIG TLV command.
-#define DEFAULT_WHEEL_DIAMETER_MM   65.0f   // Outer diameter of each drive wheel (mm)
-#define DEFAULT_WHEEL_BASE_MM       150.0f  // Centre-to-centre axle distance (mm)
 
 // ============================================================================
 // TIMING CONFIGURATION
@@ -144,13 +127,13 @@
 
 // Default PID gains for DC motors (runtime configurable via TLV)
 // Position PID (outer loop)
-#define DEFAULT_POS_KP          1.8f
+#define DEFAULT_POS_KP          10.0f
 #define DEFAULT_POS_KI          0.0f
-#define DEFAULT_POS_KD          1.0f
+#define DEFAULT_POS_KD          0.5f
 
 // Velocity PID (middle loop)
-#define DEFAULT_VEL_KP          0.5f
-#define DEFAULT_VEL_KI          0.1f
+#define DEFAULT_VEL_KP          0.2f
+#define DEFAULT_VEL_KI          4.0f
 #define DEFAULT_VEL_KD          0.0f
 
 // Torque PID (inner loop - optional, requires current sensing)
@@ -336,10 +319,10 @@
 // If no limit switches are used, leave these undefined
 // Homing is disabled if no limit switch pins are defined.
 
-// #define PIN_ST1_LIMIT           PIN_LIM1  // Stepper 1 limit (40)
-// #define PIN_ST2_LIMIT           PIN_LIM2  // Stepper 2 limit (41)
-// #define PIN_ST3_LIMIT           PIN_LIM3  // Stepper 3 limit (48)
-// #define PIN_ST4_LIMIT           PIN_LIM4  // Stepper 4 limit (49)
+#define PIN_ST1_LIMIT           PIN_LIM1  // Stepper 1 limit (40)
+#define PIN_ST2_LIMIT           PIN_LIM2  // Stepper 2 limit (41)
+#define PIN_ST3_LIMIT           PIN_LIM3  // Stepper 3 limit (48)
+#define PIN_ST4_LIMIT           PIN_LIM4  // Stepper 4 limit (49)
 
 // Limit switch active state
 #define LIMIT_ACTIVE_LOW        1       // 1 = active low, 0 = active high
@@ -385,19 +368,6 @@
 
 #if (ENCODER_4_MODE != ENCODER_2X && ENCODER_4_MODE != ENCODER_4X)
   #error "ENCODER_4_MODE must be ENCODER_2X or ENCODER_4X"
-#endif
-
-// Odometry motor assignment validation
-#if (ODOM_LEFT_MOTOR >= NUM_DC_MOTORS)
-  #error "ODOM_LEFT_MOTOR must be less than NUM_DC_MOTORS"
-#endif
-
-#if (ODOM_RIGHT_MOTOR >= NUM_DC_MOTORS)
-  #error "ODOM_RIGHT_MOTOR must be less than NUM_DC_MOTORS"
-#endif
-
-#if (ODOM_LEFT_MOTOR == ODOM_RIGHT_MOTOR)
-  #error "ODOM_LEFT_MOTOR and ODOM_RIGHT_MOTOR must be different motors"
 #endif
 
 #endif // CONFIG_H

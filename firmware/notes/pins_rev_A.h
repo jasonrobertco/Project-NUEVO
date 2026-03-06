@@ -1,26 +1,15 @@
 /**
- * @file pins.h
- * @brief [Rev. B] Hardware pin definitions for Arduino Mega 2560
+ * @file pins_rev_A.h
+ * @brief [Rev. A] Hardware pin definitions for Arduino Mega 2560 — BACKUP / ARCHIVE
  *
- * This file contains all GPIO pin assignments matching the hardware design.
- * Pin definitions are separated from config.h for clarity and maintainability.
+ * This is an archived copy of the Rev. A pin assignments.
+ * The active pin definitions are in pins.h (Rev. B).
  *
- * NOTE: This file mirrors the GPIO table in README.md and pin_table_rev_B.md.
- *       Any hardware changes should be reflected here.
- *
- * Key changes from Rev. A (see pins_rev_A.h for archive):
- *   - M1 and M2 wheel motors now use both encoder channels on dedicated INT
- *     pins (INT0/INT1 for M1, INT5/INT4 for M2) for full 4x quadrature.
- *   - M3 and M4 encoders relocated to PCINT pins (A14/A15 and pins 11/12).
- *   - M1_EN moved 5→6 (Timer4 OC4A), M2_EN moved 6→7 (Timer4 OC4B).
- *   - LED_RED moved 11→5 (Timer3 OC3A).
- *   - M2_IN1 moved 12→4, M2_IN2 moved 13→30.
- *   - Pins 13 and 31 freed as general-purpose user GPIOs.
- *   - Analog expansion reduced to A7–A13 (A14/A15 used for M3 encoders).
+ * NOTE: This file mirrors the GPIO table in pin_table_rev_A.md.
  */
 
-#ifndef PINS_H
-#define PINS_H
+#ifndef PINS_REV_A_H
+#define PINS_REV_A_H
 
 // ============================================================================
 // SERIAL COMMUNICATION
@@ -34,9 +23,6 @@
 #define PIN_RPI_TX              16      // TX to RPi5 (via level shifter 5V→3.3V)
 #define PIN_RPI_RX              17      // RX from RPi5 (via level shifter 3.3V→5V)
 
-// NOTE: Serial1 (pins 18/19) NOT AVAILABLE — used by M2_ENC_A / M2_ENC_B
-// NOTE: Serial3 (pins 14/15) NOT AVAILABLE — used by ST1_STEP / ST2_STEP
-
 // ============================================================================
 // I2C BUS
 // ============================================================================
@@ -48,22 +34,22 @@
 // DC MOTOR 1 (Default Left/Right Wheel)
 // ============================================================================
 
-#define PIN_M1_EN               6       // PWM Enable (speed control) [Timer4 OC4A]
+#define PIN_M1_EN               5       // PWM Enable (speed control)
 #define PIN_M1_IN1              8       // Direction control 1
 #define PIN_M1_IN2              43      // Direction control 2
-#define PIN_M1_ENC_A            2       // Encoder Phase A (INT0) — 4x quadrature
-#define PIN_M1_ENC_B            3       // Encoder Phase B (INT1) — 4x quadrature
+#define PIN_M1_ENC_A            2       // Encoder Phase A (INT0)
+#define PIN_M1_ENC_B            4       // Encoder Phase B
 #define PIN_M1_CT               A3      // Current sense (analog)
 
 // ============================================================================
 // DC MOTOR 2 (Default Left/Right Wheel)
 // ============================================================================
 
-#define PIN_M2_EN               7       // PWM Enable (speed control) [Timer4 OC4B]
-#define PIN_M2_IN1              4       // Direction control 1
-#define PIN_M2_IN2              30      // Direction control 2
-#define PIN_M2_ENC_A            18      // Encoder Phase A (INT5) — 4x quadrature
-#define PIN_M2_ENC_B            19      // Encoder Phase B (INT4) — 4x quadrature
+#define PIN_M2_EN               6       // PWM Enable (speed control)
+#define PIN_M2_IN1              12      // Direction control 1
+#define PIN_M2_IN2              13      // Direction control 2
+#define PIN_M2_ENC_A            3       // Encoder Phase A (INT1)
+#define PIN_M2_ENC_B            7       // Encoder Phase B
 #define PIN_M2_CT               A4      // Current sense (analog)
 
 // ============================================================================
@@ -73,8 +59,8 @@
 #define PIN_M3_EN               9       // PWM Enable (speed control)
 #define PIN_M3_IN1              34      // Direction control 1
 #define PIN_M3_IN2              35      // Direction control 2
-#define PIN_M3_ENC_A            A14     // Encoder Phase A (PCINT14) — 4x via PCINT
-#define PIN_M3_ENC_B            A15     // Encoder Phase B (PCINT15) — 4x via PCINT
+#define PIN_M3_ENC_A            18      // Encoder Phase A (INT5)
+#define PIN_M3_ENC_B            30      // Encoder Phase B
 #define PIN_M3_CT               A5      // Current sense (analog)
 
 // ============================================================================
@@ -84,8 +70,8 @@
 #define PIN_M4_EN               10      // PWM Enable (speed control)
 #define PIN_M4_IN1              36      // Direction control 1
 #define PIN_M4_IN2              37      // Direction control 2
-#define PIN_M4_ENC_A            11      // Encoder Phase A (PCINT5) — 4x via PCINT
-#define PIN_M4_ENC_B            12      // Encoder Phase B (PCINT6) — 4x via PCINT
+#define PIN_M4_ENC_A            19      // Encoder Phase A (INT4)
+#define PIN_M4_ENC_B            31      // Encoder Phase B
 #define PIN_M4_CT               A6      // Current sense (analog)
 
 // ============================================================================
@@ -152,7 +138,7 @@
 // STATUS AND USER LEDs
 // ============================================================================
 
-#define PIN_LED_RED             5       // Status LED Red (error/low battery) [Timer3 OC3A]
+#define PIN_LED_RED             11      // Status LED Red (error/low battery)
 #define PIN_LED_GREEN           44      // Status LED Green (system OK)
 #define PIN_LED_BLUE            45      // User LED Blue (exposed)
 #define PIN_LED_ORANGE          46      // User LED Orange (exposed)
@@ -163,13 +149,6 @@
 // ============================================================================
 
 #define PIN_NEOPIXEL            42      // NeoPixel data line
-
-// ============================================================================
-// USER GPIO (General Purpose — freed in Rev. B)
-// ============================================================================
-
-#define PIN_USER_P13            13      // User GPIO (was M2_IN2 in Rev. A)
-#define PIN_USER_P31            31      // User GPIO (was M4_ENC_B in Rev. A)
 
 // ============================================================================
 // SERVO CONTROLLER (PCA9685)
@@ -189,7 +168,6 @@
 
 // ============================================================================
 // ANALOG EXPANSION (Available for Sensors)
-// NOTE: A14/A15 are now used by M3 encoders — only A7–A13 are free.
 // ============================================================================
 
 #define PIN_ANALOG_EXP_1        A7      // Analog expansion 1
@@ -199,38 +177,27 @@
 #define PIN_ANALOG_EXP_5        A11     // Analog expansion 5
 #define PIN_ANALOG_EXP_6        A12     // Analog expansion 6
 #define PIN_ANALOG_EXP_7        A13     // Analog expansion 7
+#define PIN_ANALOG_EXP_8        A14     // Analog expansion 8
+#define PIN_ANALOG_EXP_9        A15     // Analog expansion 9
 
 // ============================================================================
-// TIMER OCR REGISTER ASSIGNMENTS — Rev B
+// TIMER OCR REGISTER ASSIGNMENTS — Rev A
 // ============================================================================
 //
-// These macros map motor EN and LED pins to their controlling timer compare
-// and ICR registers. Drivers write OCRnx directly instead of calling
-// analogWrite() to avoid corrupting the ISR timer configuration.
-//
-// The "IS_OCnx" flags tell ISRScheduler::init() which output compare channels
-// to connect (set COMnx bits) when configuring the timers in Fast PWM mode.
-//
-// Rev B assignments:
-//   LED_RED(pin 5)  — Timer3 OC3A  (10 kHz carrier, from ISRScheduler)
-//   M1_EN  (pin 6)  — Timer4 OC4A  (10 kHz carrier, from ISRScheduler)
-//   M2_EN  (pin 7)  — Timer4 OC4B  (10 kHz carrier, same timer as M1_EN)
-//
+// Motor 1 EN (pin 5) — Timer3 OC3A
+#define PIN_M1_EN_IS_OC3A               // Timer3 OC3A connected to pin 5 (M1_EN)
+#define PIN_M1_EN_OCR    OCR3A          // Write motor speed here instead of analogWrite()
+#define PIN_M1_EN_ICR    ICR3           // Timer TOP for scaling: duty = (speed * ICR3) / 255
 
-// LED Red (pin 5) — Timer3 OC3A
-#define PIN_LED_RED_IS_OC3A             // Timer3 OC3A connected to pin 5 (LED_RED)
-#define LED_RED_OCR      OCR3A          // Write brightness here instead of analogWrite()
-#define LED_RED_ICR      ICR3           // Timer TOP for scaling: duty = (bri * ICR3) / 255
+// Motor 2 EN (pin 6) — Timer4 OC4A
+#define PIN_M2_EN_IS_OC4A               // Timer4 OC4A connected to pin 6 (M2_EN)
+#define PIN_M2_EN_OCR    OCR4A          // Write motor speed here instead of analogWrite()
+#define PIN_M2_EN_ICR    ICR4           // Timer TOP for scaling: duty = (speed * ICR4) / 255
 
-// Motor 1 EN (pin 6) — Timer4 OC4A
-#define PIN_M1_EN_IS_OC4A               // Timer4 OC4A connected to pin 6 (M1_EN)
-#define PIN_M1_EN_OCR    OCR4A          // Write motor speed here instead of analogWrite()
-#define PIN_M1_EN_ICR    ICR4           // Timer TOP for scaling: duty = (speed * ICR4) / 255
-
-// Motor 2 EN (pin 7) — Timer4 OC4B (shares Timer4 with M1_EN)
-#define PIN_M2_EN_IS_OC4B               // Timer4 OC4B connected to pin 7 (M2_EN)
-#define PIN_M2_EN_OCR    OCR4B          // Write motor speed here instead of analogWrite()
-#define PIN_M2_EN_ICR    ICR4           // Same timer as M1_EN — ICR4 is shared TOP
+// LED Red (pin 11) — Timer1 OC1A
+#define PIN_LED_RED_IS_OC1A             // Timer1 OC1A connected to pin 11 (LED_RED)
+#define LED_RED_OCR      OCR1A          // Write brightness here instead of analogWrite()
+#define LED_RED_ICR      ICR1           // Timer TOP for scaling: duty = (bri * ICR1) / 255
 
 // ============================================================================
 // CONVENIENCE ARRAYS FOR ITERATION
@@ -251,12 +218,12 @@ const uint8_t DC_MOTOR_IN2_PINS[4] = {
   PIN_M1_IN2, PIN_M2_IN2, PIN_M3_IN2, PIN_M4_IN2
 };
 
-// DC Motor Encoder A pins (INT0/INT5 for M1/M2; PCINT14 for M3; PCINT5 for M4)
+// DC Motor Encoder A pins (interrupt-capable)
 const uint8_t DC_MOTOR_ENC_A_PINS[4] = {
   PIN_M1_ENC_A, PIN_M2_ENC_A, PIN_M3_ENC_A, PIN_M4_ENC_A
 };
 
-// DC Motor Encoder B pins (INT1/INT4 for M1/M2; PCINT15 for M3; PCINT6 for M4)
+// DC Motor Encoder B pins
 const uint8_t DC_MOTOR_ENC_B_PINS[4] = {
   PIN_M1_ENC_B, PIN_M2_ENC_B, PIN_M3_ENC_B, PIN_M4_ENC_B
 };
@@ -298,4 +265,4 @@ const uint8_t USER_LED_PINS[3] = {
   PIN_LED_BLUE, PIN_LED_ORANGE, PIN_LED_PURPLE
 };
 
-#endif // PINS_H
+#endif // PINS_REV_A_H

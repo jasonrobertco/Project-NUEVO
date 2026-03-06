@@ -216,6 +216,18 @@ public:
      */
     static void setNeoPixelBrightness(uint8_t brightness);
 
+    /**
+     * @brief Enable or disable the automatic SystemManager-driven NeoPixel animation
+     *
+     * When enabled (default), update() drives the NeoPixel based on SystemManager::getState().
+     * When disabled, setSystemStatus() / setNeoPixelColor() calls stick until changed.
+     *
+     * Disable in test sketches or wherever manual NeoPixel control is needed.
+     *
+     * @param enable true = auto animation (production default), false = manual control
+     */
+    static void setNeoAutoAnimate(bool enable);
+
 private:
     // NeoPixel driver
     static NeoPixelDriver neopixel_;
@@ -242,6 +254,7 @@ private:
     // NeoPixel animation state machine
     static uint8_t     animPhase_;       // Animation frame counter (0-255, wraps)
     static SystemState lastAnimState_;   // Detected state change → resets animPhase_
+    static bool        neoAutoAnimate_;  // true = SystemManager-driven, false = manual
 
     // Initialization flag
     static bool initialized_;

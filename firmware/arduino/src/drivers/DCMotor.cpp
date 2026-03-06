@@ -199,8 +199,16 @@ void DCMotor::setDirectPWM(int16_t pwm) {
 }
 
 void DCMotor::update() {
+    // Always update the velocity estimator so getVelocity() is accurate even
+    // when the motor is disabled (e.g. shaft being back-driven externally).
+    if (encoder_ && velocityEst_) {
+        int32_t currentPosition = encoder_->getCount();
+        uint32_t lastEdgeUs = encoder_->getLastEdgeUs();
+        velocityEst_->update(lastEdgeUs, currentPosition);
+    }
+
     if (mode_ == DC_MODE_DISABLED) {
-        return;  // Motor is disabled, do nothing
+        return;  // Motor is disabled — skip PID and PWM
     }
 
     // PWM mode: apply stored direct PWM immediately, skip PID
@@ -220,10 +228,8 @@ void DCMotor::update() {
     float dt = (currentUs - lastUpdateUs_) / 1000000.0f;  // Convert to seconds
     lastUpdateUs_ = currentUs;
 
-    // Update velocity estimator
+    // Velocity already updated above; just read the result
     int32_t currentPosition = encoder_->getCount();
-    uint32_t lastEdgeUs = encoder_->getLastEdgeUs();
-    velocityEst_->update(lastEdgeUs, currentPosition);
 
     float currentVelocity = velocityEst_->getVelocity();
 

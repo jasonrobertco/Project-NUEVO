@@ -81,7 +81,7 @@ void setup() {
     Scheduler::init();
     MessageCenter::init();
     Scheduler::registerTask(taskUART,   10,   1);   // 100 Hz
-    Scheduler::registerTask(taskStatus, 1000, 2);   //   1 Hz
+    Scheduler::registerTask(taskStatus, 1000, 2);   // 1 Hz
 }
 
 void loop() { Scheduler::tick(); }

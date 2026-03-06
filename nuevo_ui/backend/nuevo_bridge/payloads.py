@@ -435,7 +435,7 @@ class PayloadSensorRange(ctypes.Structure):
     TLV Type: SENSOR_RANGE (1027)  Direction: Arduino → RPi
     Size: 12 bytes
     sensorType: 0=ultrasonic, 1=lidar
-    status: 0=valid, 1=out of range, 2=sensor error
+    status: 0=valid, 1=out of range, 2=sensor error, 3=not installed (configured but absent)
     """
     _pack_ = 1
     _fields_ = [

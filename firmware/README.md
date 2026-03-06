@@ -25,8 +25,9 @@ firmware/
 │       ├── modules/          # Higher-level subsystems
 │       │   ├── EncoderCounter   # Interrupt-driven quadrature counting (2x/4x)
 │       │   ├── VelocityEstimator # Edge-timing velocity with moving-average filter
+│       │   ├── RobotKinematics  # Odometry model (edit here for Ackermann / mecanum)
 │       │   ├── SensorManager    # IMU fusion (Madgwick AHRS) + mag calibration
-│       │   ├── PersistentStorage # EEPROM read/write (wheel geometry, mag cal)
+│       │   ├── PersistentStorage # EEPROM read/write (mag cal offsets)
 │       │   ├── MessageCenter    # TLV packet assembly, dispatch, and state machine
 │       │   ├── StepperManager   # Multi-motor step sequencing (Timer3 ISR)
 │       │   └── UserIO           # Buttons, LEDs, NeoPixel patterns
@@ -142,8 +143,9 @@ firmware/
 
 ### Persistent Storage (EEPROM)
 - Survives power-off; ~100,000 write cycles per byte
-- Stores: wheel diameter, wheel base, magnetometer calibration offsets
-- API: `PersistentStorage::init()` / `get*` / `set*` (see `src/modules/PersistentStorage.h`)
+- Stores: magnetometer calibration offsets (hard-iron X/Y/Z)
+- Wheel geometry is compile-time only — edit `WHEEL_DIAMETER_MM` / `WHEEL_BASE_MM` in `src/modules/RobotKinematics.h`
+- API: `PersistentStorage::init()` / `getMagCalibration()` / `setMagCalibration()` (see `src/modules/PersistentStorage.h`)
 
 ### User I/O
 - 2 on-board push-buttons (INPUT_PULLUP)
@@ -154,12 +156,70 @@ firmware/
 
 ---
 
+## LED Status Reference
+
+The robot has two independent LED systems: an RGB NeoPixel that is driven automatically by the firmware state machine, and five discrete LEDs that are controlled by the Raspberry Pi (or manually via the TLV API).
+
+### NeoPixel (WS2812B, pin 42)
+
+The NeoPixel always reflects the current firmware state. Its animation is updated at **20 Hz** and resets cleanly on every state transition.
+
+| State | Color | Pattern | When it occurs |
+|-------|-------|---------|----------------|
+| **INIT** | Yellow | Solid | Brief window during `setup()` before IDLE is entered |
+| **IDLE** | Emerald green | Slow breathing (~3 s period) | Waiting for `SYS_CMD_START`; no motors running |
+| **RUNNING** | Rainbow | Hue sweep (~3.2 s per cycle) | Normal operation; motor commands accepted |
+| **ERROR** | Red | Fast flash (0.5 s period, alternates bright red ↔ dim orange-red) | Heartbeat lost while running, battery fault (critical or overvoltage), or other safety fault |
+| **ESTOP** | Red | Solid (not blinking) | Emergency stop received via `SYS_CMD_ESTOP`; requires `SYS_CMD_RESET` to recover |
+
+> **ERROR vs ESTOP:** Both show red, but ERROR blinks and ESTOP is solid. ERROR can be cleared with `SYS_CMD_RESET → IDLE`; ESTOP also requires `SYS_CMD_RESET` but is triggered by an explicit emergency stop command rather than a watchdog fault.
+
+#### Fault conditions that trigger ERROR
+
+The `SafetyManager` runs inside the 100 Hz UART ISR and forces ERROR state when any of the following are detected:
+
+| Fault | Trigger |
+|-------|---------|
+| Heartbeat timeout | No TLV received from RPi within `heartbeatTimeoutMs` (default 500 ms) while RUNNING |
+| Battery critical | Battery voltage below `VBAT_CUTOFF_V` (set by `BATTERY_TYPE` in `config.h`) |
+| Battery overvoltage | Battery voltage above `VBAT_OVERVOLTAGE_V` |
+
+In all cases, actuators (DC motors, steppers, servos) are disabled atomically before the state transition.
+
+---
+
+### Discrete LEDs
+
+The five discrete LEDs are controlled by the Raspberry Pi via the `IO_SET_LED` TLV command. The firmware manages their animation (blink timing, breathing waveform) but does not automatically change them based on system state — their behavior is entirely application-defined.
+
+| LED | Pin (Rev A) | PWM | Default use |
+|-----|-------------|-----|-------------|
+| **RED** | 11 | Yes (Timer1 OC1A) | Error / low battery indication |
+| **GREEN** | 44 | Yes (Timer5) | System OK / ready |
+| **BLUE** | 45 | Yes (Timer5) | User-defined |
+| **ORANGE** | 46 | Yes (Timer5) | User-defined / warning |
+| **PURPLE** | 47 | No (digital only) | User-defined |
+
+> **Note:** In Rev B, LED_RED moves to pin 5 (Timer3 OC3A). The firmware automatically uses the correct OCR register — `analogWrite()` is not used for LED_RED to avoid corrupting the timer.
+
+#### Available LED modes (`IO_SET_LED` TLV)
+
+| Mode | Behavior |
+|------|----------|
+| `LED_OFF` | Off |
+| `LED_ON` | Fully on at specified brightness |
+| `LED_PWM` | Constant dim at specified brightness (0–255) |
+| `LED_BLINK` | Square-wave toggle at specified period (ms) |
+| `LED_BREATHE` | Triangle-wave fade in/out at specified period. On LED_PURPLE (no PWM), falls back to ON/OFF at brightness threshold 128 |
+
+---
+
 ## Pin Tables
 
 Two PCB revisions are supported. The firmware selects pins from `pins.h`:
 
-- **[Rev. A](pin_table_rev_A.md)** — current production board (2x encoder mode for M3/M4)
-- **[Rev. B](pin_table_rev_B.md)** — in testing; full 4x quadrature on all motors via PCINT
+- **[Rev. A](notes/pin_table_rev_A.md)** — current production board (2x encoder mode for M3/M4)
+- **[Rev. B](notes/pin_table_rev_B.md)** — in testing; full 4x quadrature on all motors via PCINT
 
 > **Migration note:** Rev. B is not fully validated yet. Do not switch `pins.h` to Rev. B until hardware testing is complete. See [notes/REV_A_TO_REV_B_CHANGES.md](notes/REV_A_TO_REV_B_CHANGES.md) for the complete pin remapping rationale.
 
@@ -198,6 +258,11 @@ Edit `src/config.h` before building:
 - Set UART baud rate, heartbeat timeout, PID defaults
 - Set `IMU_ENABLED`, `LIDAR_COUNT`, `ULTRASONIC_COUNT`
 - Set `ENCODER_N_MODE` per motor (`ENCODER_2X` or `ENCODER_4X`)
+
+Edit `src/modules/RobotKinematics.h` for wheel geometry:
+- `WHEEL_DIAMETER_MM` — outer diameter of each drive wheel (mm)
+- `WHEEL_BASE_MM` — centre-to-centre track width (mm)
+- `ODOM_LEFT_MOTOR` / `ODOM_RIGHT_MOTOR` — which DC motor index is each wheel
 
 ---
 

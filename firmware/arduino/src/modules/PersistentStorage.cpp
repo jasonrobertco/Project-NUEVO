@@ -37,12 +37,8 @@ void PersistentStorage::init() {
     // First boot (or after reset()): write header + zero all fields
     writeHeader();
 
-    // Default wheel geometry: 0.0 = "not configured"
-    float zero = 0.0f;
-    EEPROM.put(PS_BASE_ADDR + PS_OFF_WHEEL_DIAM, zero);
-    EEPROM.put(PS_BASE_ADDR + PS_OFF_WHEEL_BASE, zero);
-
     // No mag calibration by default
+    float zero = 0.0f;
     EEPROM.put(PS_BASE_ADDR + PS_OFF_MAG_VALID, (uint8_t)0);
     EEPROM.put(PS_BASE_ADDR + PS_OFF_MAG_X, zero);
     EEPROM.put(PS_BASE_ADDR + PS_OFF_MAG_Y, zero);
@@ -75,38 +71,6 @@ uint8_t PersistentStorage::getVersion() {
     uint8_t v = 0;
     EEPROM.get(PS_BASE_ADDR + PS_OFF_VERSION, v);
     return v;
-}
-
-// ============================================================================
-// WHEEL GEOMETRY
-// ============================================================================
-
-bool PersistentStorage::getWheelDiameter(float& mm) {
-    if (!valid_) return false;
-    float v = 0.0f;
-    EEPROM.get(PS_BASE_ADDR + PS_OFF_WHEEL_DIAM, v);
-    if (v <= 0.0f) return false;  // 0 = not saved
-    mm = v;
-    return true;
-}
-
-void PersistentStorage::setWheelDiameter(float mm) {
-    if (!valid_) return;
-    EEPROM.put(PS_BASE_ADDR + PS_OFF_WHEEL_DIAM, mm);
-}
-
-bool PersistentStorage::getWheelBase(float& mm) {
-    if (!valid_) return false;
-    float v = 0.0f;
-    EEPROM.get(PS_BASE_ADDR + PS_OFF_WHEEL_BASE, v);
-    if (v <= 0.0f) return false;
-    mm = v;
-    return true;
-}
-
-void PersistentStorage::setWheelBase(float mm) {
-    if (!valid_) return;
-    EEPROM.put(PS_BASE_ADDR + PS_OFF_WHEEL_BASE, mm);
 }
 
 // ============================================================================
