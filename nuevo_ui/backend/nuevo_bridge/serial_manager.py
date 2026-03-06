@@ -686,10 +686,6 @@ class MockSerialManager:
 
         elif tlv_type == SYS_CONFIG:
             if a.state == _SYS_IDLE:
-                if payload.wheelDiameterMm > 0:
-                    a.wheel_diameter_mm = payload.wheelDiameterMm
-                if payload.wheelBaseMm > 0:
-                    a.wheel_base_mm = payload.wheelBaseMm
                 if payload.heartbeatTimeoutMs:
                     a.heartbeat_timeout_ms = payload.heartbeatTimeoutMs
                 if payload.resetOdometry:
@@ -815,8 +811,6 @@ class MockSerialManager:
         p.loopTimeAvgUs   = a.loop_avg_us
         p.loopTimeMaxUs   = a.loop_max_us
         p.uartRxErrors    = 0
-        p.wheelDiameterMm = a.wheel_diameter_mm
-        p.wheelBaseMm     = a.wheel_base_mm
         p.motorDirMask    = a.motor_dir_mask
         p.neoPixelCount   = a.neopixel_count
         p.heartbeatTimeoutMs = a.heartbeat_timeout_ms

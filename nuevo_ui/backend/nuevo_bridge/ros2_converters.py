@@ -155,8 +155,6 @@ def to_sys_status(data: dict, stamp: Time) -> SystemStatus:
     msg.uart_rx_errors     = data['uartRxErrors']
     msg.last_rx_ms         = data['lastRxMs']
     msg.last_cmd_ms        = data['lastCmdMs']
-    msg.wheel_diameter_mm  = float(data['wheelDiameterMm'])
-    msg.wheel_base_mm      = float(data['wheelBaseMm'])
     msg.motor_dir_mask     = data['motorDirMask']
     msg.neopixel_count     = data['neoPixelCount']
     msg.heartbeat_timeout_ms     = data['heartbeatTimeoutMs']

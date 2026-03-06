@@ -237,8 +237,6 @@ def encode_sys_cmd(data: dict) -> Optional[ctypes.Structure]:
 
 def encode_sys_config(data: dict) -> Optional[ctypes.Structure]:
     p = PayloadSysConfig()
-    p.wheelDiameterMm    = float(data.get("wheelDiameterMm", 0.0))
-    p.wheelBaseMm        = float(data.get("wheelBaseMm", 0.0))
     p.motorDirMask       = int(data.get("motorDirMask", 0))
     p.motorDirChangeMask = int(data.get("motorDirChangeMask", 0))
     p.neoPixelCount      = int(data.get("neoPixelCount", 0))

@@ -30,7 +30,7 @@ class PayloadHeartbeat(ctypes.Structure):
 class PayloadSystemStatus(ctypes.Structure):
     """
     TLV Type: SYS_STATUS (2)  Direction: Arduino → RPi
-    Size: 48 bytes
+    Size: 40 bytes
     Rate: 1 Hz (IDLE/ESTOP), 10 Hz (RUNNING/ERROR)
     """
     _pack_ = 1
@@ -50,8 +50,6 @@ class PayloadSystemStatus(ctypes.Structure):
         ("loopTimeAvgUs",          ctypes.c_uint16),
         ("loopTimeMaxUs",          ctypes.c_uint16),
         ("uartRxErrors",           ctypes.c_uint16),
-        ("wheelDiameterMm",        ctypes.c_float),
-        ("wheelBaseMm",            ctypes.c_float),
         ("motorDirMask",           ctypes.c_uint8),    # Direction inversion bitmask
         ("neoPixelCount",          ctypes.c_uint8),
         ("heartbeatTimeoutMs",     ctypes.c_uint16),
@@ -76,13 +74,11 @@ class PayloadSysCmd(ctypes.Structure):
 class PayloadSysConfig(ctypes.Structure):
     """
     TLV Type: SYS_CONFIG (4)  Direction: RPi → Arduino
-    Size: 16 bytes
+    Size: 8 bytes
     IDLE state only. Fields at sentinel (0 / 0xFF) are not changed.
     """
     _pack_ = 1
     _fields_ = [
-        ("wheelDiameterMm",    ctypes.c_float),   # 0.0 = no change
-        ("wheelBaseMm",        ctypes.c_float),   # 0.0 = no change
         ("motorDirMask",       ctypes.c_uint8),
         ("motorDirChangeMask", ctypes.c_uint8),   # Which motors to update
         ("neoPixelCount",      ctypes.c_uint8),   # 0 = no change
@@ -559,9 +555,9 @@ def verify_payload_sizes():
     expected_sizes = {
         # System
         PayloadHeartbeat:         5,
-        PayloadSystemStatus:      48,
+        PayloadSystemStatus:      40,
         PayloadSysCmd:            4,
-        PayloadSysConfig:         16,
+        PayloadSysConfig:         8,
         PayloadSetPID:            24,
         # DC Motor
         PayloadDCEnable:          4,
