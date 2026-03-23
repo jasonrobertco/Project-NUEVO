@@ -9,7 +9,7 @@
     all telemetry as ROS2 topics while subscribing to command topics.
   </description>
 
-  <maintainer email="mae162@ucdavis.edu">MAE 162 Staff</maintainer>
+  <maintainer email="pc.toby.chen@gmail.com">Toby Chen</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>

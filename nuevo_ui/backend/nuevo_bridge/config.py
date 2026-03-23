@@ -9,7 +9,7 @@ SERIAL_BAUD = int(os.getenv("NUEVO_SERIAL_BAUD", "250000"))   # Must match firmw
 SERIAL_TIMEOUT = 0.1  # seconds (non-blocking)
 
 # Heartbeat configuration
-HEARTBEAT_INTERVAL = 0.2  # seconds (200ms, same as test_uart_arduino.py)
+HEARTBEAT_INTERVAL = 0.1  # seconds (200ms, same as test_uart_arduino.py)
 
 # TLV protocol configuration
 DEVICE_ID = 0x01  # RPi device ID
