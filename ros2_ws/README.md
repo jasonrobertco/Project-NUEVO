@@ -28,7 +28,7 @@ ros2_ws/
 │   ├── robot/        # main robot logic, bringup, config, URDF, RViz
 │   ├── sensors/      # Pi-side sensor nodes outside the Arduino firmware
 │   └── vision/       # camera and perception nodes
-├── docker/           # Docker image, compose files, and entrypoint
+├── docker/           # Docker image, compose files, and entrypoint scripts for the core ROS stack
 ├── ROS2_NODES_DESIGN.md
 ├── BRIDGE_RUNTIME.md
 ├── RPI_SETUP.md
@@ -105,6 +105,13 @@ Two compose files are provided:
 |---|---|---|
 | Raspberry Pi with Arduino | `ros2_ws/docker/docker-compose.rpi.yml` | real hardware |
 | macOS / Windows | `ros2_ws/docker/docker-compose.vm.yml` | mock bridge |
+
+The current Docker image is a control-first ROS stack:
+
+- it includes the shared bridge runtime and core ROS packages
+- it does not yet include camera, OpenCV, libcamera, or YOLO dependencies
+- those heavier vision dependencies will be added later when the `vision`
+  package is activated
 
 
 ## Build the Frontend First

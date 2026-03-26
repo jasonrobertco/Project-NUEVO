@@ -17,7 +17,7 @@ services:
   robot:
     build:
       context: ../..
-      dockerfile: ros2_ws/docker/Dockerfile.bridge
+      dockerfile: ros2_ws/docker/Dockerfile.robot
 
     image: nuevo-ros2:latest
 

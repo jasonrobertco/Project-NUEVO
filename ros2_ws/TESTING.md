@@ -21,6 +21,7 @@ These steps verify that:
 - the ROS interface package is now `bridge_interfaces`
 - the new `/set_firmware_state` service works
 - continuous commands such as `/dc_set_velocity` remain topic-based
+- the current Docker image is sufficient for robot control without vision
 
 
 ## Before You Start
@@ -42,6 +43,12 @@ cp -r nuevo_ui/frontend/dist/. nuevo_ui/backend/static/
 - Real target: `ros2_ws/docker/docker-compose.rpi.yml`
 - Mock mode: `ros2_ws/docker/docker-compose.vm.yml`
 
+4. The current Docker image is intentionally control-first:
+
+- it includes the bridge runtime and core ROS packages
+- it does not include camera, OpenCV, libcamera, `camera_ros`, or YOLO
+- for now, the goal is to validate robot control and ROS integration only
+
 
 ## A. Real Target Test on Raspberry Pi
 
@@ -57,8 +64,8 @@ docker compose -f $COMPOSE up
 
 Notes:
 
-- the first image build can take a long time because it builds Raspberry Pi
-  `libcamera` and `camera_ros`
+- the first image build should now be much shorter than the earlier camera
+  image because it no longer builds `libcamera` or `camera_ros`
 - the first container start also runs `colcon build`
 - later restarts reuse the Docker and `colcon` caches
 
@@ -230,6 +237,19 @@ ros2 topic echo /sys_state
 
 Then run the same service tests from section A.6.
 
+You can also confirm the lighter image contents:
+
+```bash
+python3 -c "import fastapi, serial"
+python3 -c "import cv2"
+```
+
+Expected result:
+
+- the first command succeeds
+- the second command should fail for now because OpenCV is intentionally not
+  part of the current control-first image
+
 
 ## Fast Unit Tests
 
@@ -298,3 +318,4 @@ Today’s ROS2 changes are considered good if all of these are true:
 - `/set_firmware_state` exists and behaves correctly
 - continuous commands still use topics
 - the unit tests pass
+- the image works for robot control without any camera or vision stack installed
