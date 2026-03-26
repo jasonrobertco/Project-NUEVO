@@ -5,10 +5,10 @@ SerialManager: manages UART to Arduino.
   - Dedicated blocking reader thread: ser.read() returns the instant bytes arrive
     (10 ms timeout allows clean shutdown check without busy-looping)
   - asyncio event loop handles heartbeat / stats / WebSocket — never blocked by I/O
-  - threading.Lock on ser.write() so asyncio heartbeat and rclpy callbacks coexist safely
+  - threading.Lock on ser.write() so asyncio heartbeat and external command callbacks coexist safely
   - Feeds received bytes to TLV decoder → message_router.decode_incoming()
   - Flushes decoded batch to WebSocket (via asyncio.run_coroutine_threadsafe) and
-    optionally to a ROS2 node (publisher calls are thread-safe in rclpy)
+    optionally to an external decoded-message sink
 
 MockSerialManager: physics-based Arduino simulator for development.
   - Full Arduino state machine: INIT → IDLE → RUNNING / ERROR / ESTOP
@@ -96,12 +96,12 @@ class SerialManager:
         self.encoder = Encoder(deviceId=DEVICE_ID, bufferSize=4096, crc=ENABLE_CRC)
         self.decoder = Decoder(callback=self._decode_callback, crc=ENABLE_CRC)
 
-        # Protects ser.write() — called from asyncio thread (heartbeat) and
-        # rclpy spin thread (/cmd_vel callbacks) simultaneously in ROS2 mode.
+        # Protects ser.write() — called from asyncio tasks and optional
+        # external command callbacks simultaneously.
         self._write_lock = threading.Lock()
 
-        # Set by app.py when NUEVO_ROS2=1; publish_decoded() called from reader thread.
-        self._ros2_node = None
+        # Optional external sink with a publish_decoded(msg_dict) method.
+        self._decoded_message_sink = None
 
         # Captured in run() so the reader thread can schedule coroutines on it.
         self._asyncio_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -135,9 +135,9 @@ class SerialManager:
     # ROS2 integration hook
     # ------------------------------------------------------------------
 
-    def set_ros2_node(self, node) -> None:
-        """Called from app.py after the ROS2 node is constructed."""
-        self._ros2_node = node
+    def set_decoded_message_sink(self, sink) -> None:
+        """Register an optional decoded-message consumer for the reader thread."""
+        self._decoded_message_sink = sink
 
     # ------------------------------------------------------------------
     # Serial connection
@@ -223,10 +223,11 @@ class SerialManager:
                 self._asyncio_loop,
             )
 
-        # → ROS2: rclpy publishers are thread-safe for concurrent publish() calls
-        if self._ros2_node is not None:
+        # → Optional external sink: the shared runtime can fan out the same
+        # decoded message batch to another consumer such as the ROS wrapper.
+        if self._decoded_message_sink is not None:
             for msg in msgs:
-                self._ros2_node.publish_decoded(msg)
+                self._decoded_message_sink.publish_decoded(msg)
 
     # ------------------------------------------------------------------
     # Blocking reader thread
@@ -277,7 +278,7 @@ class SerialManager:
         """
         Thread-safe TLV send. Called from:
           - asyncio event loop (heartbeat, UI WebSocket commands)
-          - rclpy spin thread (/cmd_vel, /nuevo/step_cmd, etc.) in ROS2 mode
+          - optional external callbacks in an integrated runtime
         ser.write() to the OS TX buffer is sub-millisecond; lock hold time is negligible.
         """
         if not self.connected or not self.ser:
@@ -746,10 +747,10 @@ class MockSerialManager:
         self.last_stats_time = 0.0
 
     # ------------------------------------------------------------------
-    # ROS2 stub — mock doesn't publish ROS2 topics (no hardware to mirror)
+    # Optional sink stub — mock doesn't need external publish fan-out
     # ------------------------------------------------------------------
 
-    def set_ros2_node(self, node) -> None:
+    def set_decoded_message_sink(self, sink) -> None:
         pass  # intentionally a no-op for the mock
 
     # ------------------------------------------------------------------

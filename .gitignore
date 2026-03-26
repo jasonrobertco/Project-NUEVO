@@ -4,8 +4,10 @@
 # Local development environment
 # ============================================
 .claude/
+.codex
 .vscode/
 .local/
+openspec/
 
 # ============================================
 # ROS2 Workspace

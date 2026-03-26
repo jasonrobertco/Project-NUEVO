@@ -4,7 +4,7 @@
 # Usage (from Project-NUEVO/ repository root):
 #   docker compose -f ros2_ws/docker/docker-compose.rpi.yml up
 #
-# First startup builds nuevo_msgs + nuevo_bridge with colcon (~60s).
+# First startup builds the ROS workspace with colcon (~60s).
 # Subsequent restarts reuse the cached build artifacts (named volumes): ~5s.
 #   - Python / .msg changes → docker compose restart  (no image rebuild)
 #   - Pip dep changes        → docker compose build    (rebuilds image layer)
@@ -32,9 +32,10 @@ services:
     privileged: true
 
     volumes:
-      # Source packages — live from repo (edits take effect on container restart).
-      - ../../ros2_ws/src/nuevo_msgs:/ros2_ws/src/nuevo_msgs:ro
-      - ../../nuevo_ui/backend:/ros2_ws/src/nuevo_bridge:ro
+      # ROS workspace source — live from repo (edits take effect on restart).
+      - ../../ros2_ws/src:/ros2_ws/src:ro
+      # Shared Python bridge runtime used by the ROS wrapper package.
+      - ../../nuevo_ui/backend:/workspace/nuevo_bridge_source:ro
       # colcon build cache — only slow on first run. Wipe with: docker compose down -v
       - ros2_build:/ros2_ws/build
       - ros2_install:/ros2_ws/install
@@ -48,9 +49,9 @@ services:
       - /dev/shm:exec
 
     environment:
-      - NUEVO_ROS2=1
+      - NUEVO_BRIDGE_SOURCE=/workspace/nuevo_bridge_source
       - NUEVO_SERIAL_PORT=/dev/ttyAMA0
-      - NUEVO_SERIAL_BAUD=1000000
+      - NUEVO_SERIAL_BAUD=200000
       # Suppress libcamera INFO noise; change to DEBUG to troubleshoot camera
       - LIBCAMERA_LOG_LEVELS=*:WARNING
 

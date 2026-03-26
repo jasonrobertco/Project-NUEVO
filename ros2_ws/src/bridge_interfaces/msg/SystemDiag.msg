@@ -1,0 +1,11 @@
+std_msgs/Header header
+uint16 free_sram
+uint16 loop_time_avg_us
+uint16 loop_time_max_us
+uint16 uart_rx_errors
+uint16 crc_errors
+uint16 frame_errors
+uint16 tlv_errors
+uint16 oversize_errors
+uint16 tx_pending_bytes
+uint32 tx_dropped_frames

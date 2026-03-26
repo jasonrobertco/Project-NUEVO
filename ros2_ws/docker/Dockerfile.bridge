@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Dockerfile.bridge — NUEVO Bridge (ROS2 mode)
+# Dockerfile.bridge — ROS2 bridge runtime image
 #
 # Target: Raspberry Pi 5 running Ubuntu 25.10 server (arm64)
 # ROS2:   Jazzy Jalisco (multi-arch image includes linux/arm64)
@@ -7,8 +7,8 @@
 # Build context: Project-NUEVO/ repository root
 #   docker compose -f ros2_ws/docker/docker-compose.bridge.yml build
 #
-# Both nuevo_msgs and nuevo_bridge source are volume-mounted at runtime
-# (see docker-compose.bridge.yml). The image only installs system
+# The ROS workspace source and the shared nuevo_bridge backend are
+# volume-mounted at runtime. The image only installs system
 # dependencies and Python packages — no source code is baked in.
 # colcon build runs in the entrypoint and its artifacts are cached in a
 # named Docker volume, so only the first startup is slow (~60s).
@@ -41,7 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ⚠  First docker build: ~10 min compile. Docker layer cache skips this on
 #    subsequent builds unless this RUN block changes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git cmake ninja-build pkg-config \
+        git cmake meson ninja-build pkg-config \
         python3-dev python3-jinja2 python3-yaml python3-ply \
         libboost-dev libgnutls28-dev openssl \
         pybind11-dev libyaml-dev \
@@ -84,7 +84,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /tmp/cam_ws \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# ── Python runtime deps for the bridge ───────────────────────────────────────
+# ── Python runtime deps for the shared bridge runtime ────────────────────────
 RUN pip3 install --no-cache-dir --break-system-packages \
     "fastapi>=0.109.0,<1.0" \
     "uvicorn[standard]>=0.27.0,<1.0" \
@@ -104,4 +104,4 @@ COPY ros2_ws/docker/entrypoint.bridge.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["uvicorn", "nuevo_bridge.app:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
+CMD ["bridge"]

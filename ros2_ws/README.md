@@ -1,107 +1,157 @@
 # ROS2 Workspace
 
-**ROS2 distribution: Jazzy Jalisco** (LTS 2024–2029)
+This folder contains the ROS2 side of Project NUEVO.
 
-> **Why Docker?** ROS2 Jazzy officially supports Ubuntu 24.04 only — our RPi 5 runs Ubuntu 25.10,
-> which has no pre-built ROS2 packages. Docker runs `ros:jazzy-ros-base` (Ubuntu 24.04 inside)
-> regardless of the host OS. Docker is the standard workflow for all platforms.
+The current ROS2 design keeps the workspace small and beginner-friendly:
 
----
+- `bridge_interfaces` defines the raw firmware and bridge-facing ROS interfaces
+- `bridge` wraps the shared `nuevo_bridge` runtime and exposes ROS topics
+- `robot` is the main robot application package
+- `sensors` is for Raspberry Pi connected sensors outside the Arduino firmware
+- `vision` is for camera and perception code
 
-## Packages
+If you are new to ROS2, read these files in order:
 
-| Package | Status | Description |
-|---------|--------|-------------|
-| `nuevo_msgs` | ✅ Ready | Custom message definitions (voltage, motor status, servo status, IMU cal, etc.) |
-| `nuevo_bridge` | ✅ Ready | Arduino ↔ ROS2 ↔ WebSocket bridge (`nuevo_ui/backend/`, mounted via Docker volume) |
-| `robot_bringup` | Planned | Launch files and system configuration |
-| `robot_control` | Planned | Velocity control, trajectory planning, pure pursuit |
-| `sensor_drivers` | Planned | Pi camera (YOLO/OpenCV), GPS receiver |
-| `robot_description` | Planned | URDF models and visualization |
+1. [ROS2_NODES_DESIGN.md](ROS2_NODES_DESIGN.md)
+2. [BRIDGE_RUNTIME.md](BRIDGE_RUNTIME.md)
+3. [RPI_SETUP.md](RPI_SETUP.md) if you are using a real Raspberry Pi
+4. [TESTING.md](TESTING.md) when you want to validate the current bridge and ROS2 flows
 
----
 
-## 0. Build the frontend (one-time)
+## Package Layout
 
-The WebSocket UI must be compiled to static files before the bridge can serve it.
-Skip if you only need ROS2 topics without the web UI.
+```text
+ros2_ws/
+├── src/
+│   ├── bridge_interfaces/   # raw bridge-facing ROS interfaces that mirror the current protocol
+│   ├── bridge/       # ROS wrapper around the shared nuevo_bridge runtime
+│   ├── robot/        # main robot logic, bringup, config, URDF, RViz
+│   ├── sensors/      # Pi-side sensor nodes outside the Arduino firmware
+│   └── vision/       # camera and perception nodes
+├── docker/           # Docker image, compose files, and entrypoint
+├── ROS2_NODES_DESIGN.md
+├── BRIDGE_RUNTIME.md
+├── RPI_SETUP.md
+└── TESTING.md
+```
+
+
+## Shared Runtime Model
+
+The ROS bridge does **not** duplicate the web bridge.
+
+- The shared Python runtime lives in [nuevo_ui/backend/nuevo_bridge](../nuevo_ui/backend/nuevo_bridge)
+- The ROS package lives in [src/bridge](src/bridge)
+- In ROS mode, one integrated process owns:
+  - one serial connection to the Arduino
+  - one decode path
+  - one FastAPI/WebSocket UI server
+  - one ROS node
+
+That means the UI and ROS always see the same decoded firmware state and use
+the same outbound command path.
+
+
+## Topics
+
+The raw ROS topics use the same lowercase snake_case names as the bridge and
+firmware protocol. Examples:
+
+- `/sys_state`
+- `/sys_power`
+- `/dc_state_all`
+- `/step_state_all`
+- `/sensor_imu`
+- `/sensor_kinematics`
+- `/dc_set_velocity`
+- `/dc_home`
+- `/sensor_mag_cal_cmd`
+
+This workspace intentionally treats those raw topics as the primary internal
+ROS API. Standard ROS topics such as `/odom` or `/imu/data` can be added later
+as adapters if needed.
+
+See [docs/COMMUNICATION_PROTOCOL.md](../docs/COMMUNICATION_PROTOCOL.md) for the
+protocol naming and semantics that these topics mirror.
+
+
+## Command API Rule
+
+Use the ROS API based on how the command behaves:
+
+- use **services** for discrete actions where the caller expects success,
+  rejection, or timeout
+- use **topics** for continuous setpoints or frequently updated control inputs
+
+Current example:
+
+- `/set_firmware_state` uses `bridge_interfaces/srv/SetFirmwareState`
+- `/dc_set_velocity` uses `bridge_interfaces/msg/DCSetVelocity`
+- `/dc_set_pwm` uses `bridge_interfaces/msg/DCSetPwm`
+
+The raw `/sys_cmd` topic still exists for low-level debugging, but normal ROS
+callers should prefer `/set_firmware_state`.
+
+
+## Docker Workflow
+
+Docker is the default workflow for ROS2 because ROS2 Jazzy officially targets
+Ubuntu 24.04, while the project may be developed on Raspberry Pi OS / Ubuntu,
+macOS, or Windows.
+
+Two compose files are provided:
+
+| Platform | Compose file | Mode |
+|---|---|---|
+| Raspberry Pi with Arduino | `ros2_ws/docker/docker-compose.rpi.yml` | real hardware |
+| macOS / Windows | `ros2_ws/docker/docker-compose.vm.yml` | mock bridge |
+
+
+## Build the Frontend First
+
+The bridge serves the built web UI. Build the frontend once before starting the
+ROS bridge:
 
 ```bash
 cd nuevo_ui/frontend
-npm install        # first time only
+npm install
 npm run build
-cd ..
-cp -r frontend/dist/. backend/static/
+cd ../..
+cp -r nuevo_ui/frontend/dist/. nuevo_ui/backend/static/
 ```
 
-See [`nuevo_ui/README.md`](../nuevo_ui/README.md) for full frontend development instructions.
 
----
+## Start the ROS Bridge in Docker
 
-## 1. Install Docker (one-time per machine)
+From the repository root:
 
-### Raspberry Pi 5 (Ubuntu 25.10)
-```bash
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER
-newgrp docker
-```
+### Raspberry Pi
 
-Start docker:
-```bash
-sudo systemctl start docker
-```
-
-### macOS
-1. Install [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/)
-2. Open **Docker Desktop** and wait for the whale icon in the menu bar to stop animating
-
-### Windows
-1. Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) with the **WSL 2** backend
-2. Open **Docker Desktop** and wait for the whale icon in the taskbar to stop animating
-
----
-
-## 2. Set your compose file
-
-Do this from the project root `project-NUEVO/` folder.
-Two compose files are provided — pick the one for your platform:
-
-| Platform | Compose file | Mode |
-|----------|-------------|------|
-| **Raspberry Pi** | `ros2_ws/docker/docker-compose.rpi.yml` | Real Arduino on `/dev/ttyAMA0` |
-| **macOS / Windows** | `ros2_ws/docker/docker-compose.vm.yml` | Mock (simulated data, no Arduino) |
-
-Set a shell variable so you can copy-paste all commands below without changes:
-
-### Raspberry Pi (real target)
 ```bash
 COMPOSE=ros2_ws/docker/docker-compose.rpi.yml
+docker compose -f $COMPOSE build
+docker compose -f $COMPOSE up
 ```
 
-### macOS (VM)
+### macOS / Windows
+
 ```bash
 COMPOSE=ros2_ws/docker/docker-compose.vm.yml
-```
-
-### Windows
-> **Windows PowerShell:** use `$env:COMPOSE = "ros2_ws/docker/docker-compose.vm.yml"` instead.
-
----
-
-## 3. Build the Docker image (one-time, or after pip dependency changes)
-
-```bash
-# From the repository root (Project-NUEVO/)
 docker compose -f $COMPOSE build
+docker compose -f $COMPOSE up
 ```
 
----
+The UI will be available at:
 
-## Option A — Manual shell (recommended for learning)
+```text
+http://localhost:8000
+```
 
-Starts a bare shell inside the container with nothing running. Build the ROS2
-packages and launch the bridge yourself — good for understanding each step.
+
+## Manual ROS2 Shell Workflow
+
+If you want to learn the pieces step by step, open a shell inside the Docker
+container instead of starting the stack directly:
 
 ```bash
 docker compose -f $COMPOSE run --rm --entrypoint bash robot
@@ -110,166 +160,103 @@ docker compose -f $COMPOSE run --rm --entrypoint bash robot
 Inside the container:
 
 ```bash
-# 1. Source the ROS2 base install
 source /opt/ros/jazzy/setup.bash
-
-# 2. Build the packages (nuevo_msgs + nuevo_bridge)
-colcon build --packages-select nuevo_msgs nuevo_bridge --symlink-install --cmake-args -DBUILD_TESTING=OFF
-
-# 3. Source the built packages
+colcon build --symlink-install --cmake-args -DBUILD_TESTING=OFF
 source install/setup.bash
 
-# 4. Verify packages are visible
-ros2 pkg list | grep nuevo
-ros2 interface show nuevo_msgs/msg/Voltage
+ros2 pkg list | grep -E 'bridge_interfaces|bridge|robot|sensors|vision'
+ros2 interface show bridge_interfaces/msg/SystemPower
 
-# 5. Start the bridge
-uvicorn nuevo_bridge.app:app --host 0.0.0.0 --port 8000
+bridge
 ```
 
-Press `Ctrl+C` to stop. Type `exit` or press `Ctrl+D` to leave (container is removed automatically).
+In another shell inside the same container:
 
-The WebSocket UI is accessible at `http://localhost:8000`.
-
-> **macOS / Windows — ROS2 topics:** The container uses bridge networking, so `ros2 topic list`
-> from a Mac/Windows terminal will not see container topics. Use the shell inside the container.
-
----
-
-## Option B — Automated
-
-The entrypoint handles the colcon build automatically on first start.
-
-**Terminal 1 — start the stack**
 ```bash
-docker compose -f $COMPOSE up
-```
+source /opt/ros/jazzy/setup.bash
+source /ros2_ws/install/setup.bash
 
-**Terminal 2 — open a shell into the running container**
-```bash
-docker compose -f $COMPOSE exec robot bash
-# then:
 ros2 topic list
-ros2 topic echo /nuevo/voltage
+ros2 topic echo /sys_state
+ros2 topic echo /dc_state_all
 ```
 
-The WebSocket UI is accessible at `http://localhost:8000`.
+Example command:
 
----
+```bash
+ros2 service call /set_firmware_state bridge_interfaces/srv/SetFirmwareState "{target_state: 2}"
 
-## Common Docker commands
+# Continuous control stays topic-based
+ros2 topic pub --once /dc_set_velocity bridge_interfaces/msg/DCSetVelocity \
+  "{motor_number: 1, target_ticks: 200}"
+```
+
+
+## Native Ubuntu 24.04 Workflow
+
+Native ROS2 is optional. If you are on Ubuntu 24.04, you can build the workspace
+without Docker after installing ROS2 Jazzy.
+
+```bash
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install
+source install/setup.bash
+```
+
+The shared backend source must also be available on `PYTHONPATH` or pointed to
+with `NUEVO_BRIDGE_SOURCE`:
+
+```bash
+export NUEVO_BRIDGE_SOURCE="$(pwd)/../nuevo_ui/backend"
+bridge
+```
+
+
+## Beginner Notes
+
+- `bridge_interfaces` is the raw firmware and bridge-facing interface package. It is not a node.
+- `bridge` is the ROS package that starts the integrated UI + ROS bridge.
+- `nuevo_bridge` is the shared Python runtime outside `ros2_ws`.
+- `robot`, `sensors`, and `vision` are separate packages because they represent
+  different responsibilities, not because every node needs its own package.
+- Discrete operations such as firmware state changes should use services.
+- Continuous commands such as velocity or PWM should stay on topics.
+- If `sensors` or `vision` later need custom non-standard ROS interfaces, they
+  can add subsystem-specific interface packages instead of expanding
+  `bridge_interfaces` into a generic catch-all.
+
+
+## Follow-up Service Candidates
+
+The next bridge actions that are good candidates for service migration are:
+
+- `dc_home`
+- `dc_reset_position`
+- `step_home`
+- `sys_odom_reset`
+- `sensor_mag_cal_cmd`
+
+These are all discrete operations. They should move to services only when the
+bridge can return a clear success, rejection, or timeout result without making
+the API harder to learn.
+
+
+## Useful Commands
 
 ```bash
 # Stop the stack
 docker compose -f $COMPOSE down
 
-# Restart after Python source or .msg changes
-docker compose -f $COMPOSE restart
-
-# Rebuild image after pip dependency changes
+# Rebuild the Docker image after dependency changes
 docker compose -f $COMPOSE build
 
-# Force a clean colcon build (wipes build/install volumes)
+# Clean the ROS build cache
 docker compose -f $COMPOSE down -v
-docker compose -f $COMPOSE up
 
-# View live logs
+# View logs
 docker compose -f $COMPOSE logs -f
+
+# Inspect a message definition
+ros2 interface show bridge_interfaces/msg/DCStateAll
 ```
-
-### Useful commands inside the container
-
-```bash
-ros2 pkg list | grep nuevo           # confirm packages are built
-ros2 interface show nuevo_msgs/msg/Voltage # inspect a message type
-ros2 topic list                      # list active topics (bridge must be running)
-ros2 topic echo /odom
-ros2 topic hz /nuevo/dc_status       # check publish rate
-
-# Send commands (bridge must be running)
-ros2 topic pub --once /nuevo/sys_cmd nuevo_msgs/msg/SysCommand "{command: 2}"
-ros2 topic pub --once /nuevo/cmd_vel nuevo_msgs/msg/MotorVelocities \
-    "{velocity_ticks_per_sec: [500, 500, 500, 500], mode: [2, 2, 2, 2]}"
-```
-
----
-
-## 4. Ubuntu 24.04 — native install (optional, dev machines only)
-
-> Only applicable to machines running Ubuntu 24.04 (Noble). **Not for the RPi 5 (Ubuntu 25.10).**
-
-### Install ROS2 Jazzy
-
-```bash
-sudo apt install -y software-properties-common curl
-sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
-    -o /usr/share/keyrings/ros-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
-    http://packages.ros.org/ros2/ubuntu noble main" \
-    | sudo tee /etc/apt/sources.list.d/ros2.list
-
-sudo apt update && sudo apt install -y \
-    ros-jazzy-ros-base \
-    python3-colcon-common-extensions \
-    python3-rosdep \
-    python3-pip
-
-sudo rosdep init && rosdep update
-```
-
-### Build and run
-
-```bash
-cd nuevo_ui/backend && pip3 install -e . && cd ../..
-
-cd ros2_ws
-source /opt/ros/jazzy/setup.bash
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install
-source install/setup.bash
-
-export PYTHONPATH="$(pwd)/../nuevo_ui/backend:$PYTHONPATH"
-NUEVO_ROS2=1 uvicorn nuevo_bridge.app:app --host 0.0.0.0 --port 8000
-```
-
-### Clean build
-
-```bash
-rm -rf build/ install/ log/ && colcon build --symlink-install
-```
-
----
-
-## Raspberry Pi 5 GPIO Reference
-
-| RPi GPIO | Function | Connected to |
-|----------|----------|--------------|
-| GPIO2 (SDA1) | I2C Data | 2× Qwiic connectors (RPi bus) |
-| GPIO3 (SCL1) | I2C Clock | 2× Qwiic connectors (RPi bus) |
-| GPIO14 (TXD0) | UART TX → Arduino | Via 5V↔3.3V level shifter |
-| GPIO15 (RXD0) | UART RX ← Arduino | Via 5V↔3.3V level shifter |
-| Other | GPIO breakout | Unused pins to screw terminals |
-
-UART baud rate: **1,000,000 bps**
-
----
-
-## ROS2 Topic Reference
-
-| Topic | Type | Direction | Rate |
-|-------|------|-----------|------|
-| `/odom` | `nav_msgs/Odometry` | Bridge → nodes | 100 Hz |
-| `/imu/data` | `sensor_msgs/Imu` | Bridge → nodes | 100 Hz |
-| `/imu/mag` | `sensor_msgs/MagneticField` | Bridge → nodes | 100 Hz |
-| `/nuevo/voltage` | `nuevo_msgs/Voltage` | Bridge → nodes | 10 Hz |
-| `/nuevo/sys_status` | `nuevo_msgs/SystemStatus` | Bridge → nodes | 1–10 Hz |
-| `/nuevo/dc_status` | `nuevo_msgs/DCStatusAll` | Bridge → nodes | 100 Hz |
-| `/nuevo/step_status` | `nuevo_msgs/StepStatusAll` | Bridge → nodes | 100 Hz |
-| `/nuevo/servo_status` | `nuevo_msgs/ServoStatusAll` | Bridge → nodes | 50 Hz |
-| `/nuevo/io_status` | `nuevo_msgs/IOStatus` | Bridge → nodes | 100 Hz |
-| `/nuevo/mag_cal` | `nuevo_msgs/MagCalStatus` | Bridge → nodes | 10 Hz |
-| `/nuevo/cmd_vel` | `nuevo_msgs/MotorVelocities` | Nodes → bridge | control loop rate |
-| `/nuevo/step_cmd` | `nuevo_msgs/StepCommand` | Nodes → bridge | on demand |
-| `/nuevo/servo_cmd` | `nuevo_msgs/ServoCommand` | Nodes → bridge | on demand |
-| `/nuevo/sys_cmd` | `nuevo_msgs/SysCommand` | Nodes → bridge | on demand |
-| `/nuevo/mag_cal_cmd` | `nuevo_msgs/MagCalCmd` | Nodes → bridge | on demand |

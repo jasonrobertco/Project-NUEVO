@@ -4,8 +4,7 @@ Entry point for running nuevo_bridge as a module.
 Usage (plain Python / dev):
     python -m nuevo_bridge
 
-Usage (ROS2 mode via colcon install):
-    NUEVO_ROS2=1 nuevo_bridge
+The ROS-integrated entrypoint lives in ros2_ws/src/bridge.
 """
 import uvicorn
 

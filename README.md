@@ -38,16 +38,16 @@ A modular two-wheeled mobile robot platform designed for hands-on robotics educa
 
 
 
-
 ## Key Documents
 
 | Document | Purpose |
 |----------|---------|
+| [docs/README.md](docs/README.md) | Cross-project documentation map and source-of-truth index |
 | [docs/COMMUNICATION_PROTOCOL.md](docs/COMMUNICATION_PROTOCOL.md) | Current human-readable source of truth for protocol behavior, framing, and logical TLV design |
-| [docs/TLV_MODIFY_PLAN.md](docs/TLV_MODIFY_PLAN.md) | Planned TLV redesign notes and message cleanup goals |
-| [docs/DESIGN_GUIDELINES.md](docs/DESIGN_GUIDELINES.md) | Cross-project conventions and protocol update workflow |
+| [docs/DESIGN_GUIDELINES.md](docs/DESIGN_GUIDELINES.md) | Cross-project conventions, numbering rules, and protocol update workflow |
 | [tlv_protocol/TLV_Payloads.md](tlv_protocol/TLV_Payloads.md) | Exact payload layouts and sizes |
-| [firmware/README.md](firmware/README.md) | Arduino firmware architecture, build instructions |
+| [firmware/README.md](firmware/README.md) | Arduino firmware overview, current features, and build instructions |
+| [firmware/docs/README.md](firmware/docs/README.md) | Firmware subsystem documentation index |
 | [NUEVO board/SPECIFICATIONS.md](NUEVO%20board/SPECIFICATIONS.md) | PCB hardware specifications |
 
 ## Technologies
