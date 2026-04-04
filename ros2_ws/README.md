@@ -90,7 +90,7 @@ The raw `/sys_cmd` topic still exists for low-level debugging, but normal ROS
 callers should prefer `/set_firmware_state`.
 
 
-## Docker Workflow
+## Workflow Overview
 
 Docker is the default workflow for ROS2 because ROS2 Jazzy officially targets
 Ubuntu 24.04, while the project may be developed on Raspberry Pi OS / Ubuntu,
@@ -103,23 +103,37 @@ Two compose files are provided:
 | Raspberry Pi with Arduino | `ros2_ws/docker/docker-compose.rpi.yml` | real hardware |
 | macOS / Windows | `ros2_ws/docker/docker-compose.vm.yml` | mock bridge |
 
-The current Docker image is a control-first ROS stack:
+Important:
 
-- it includes the shared bridge runtime and core ROS packages
-- it does not yet include camera, OpenCV, libcamera, or YOLO dependencies
-- those heavier vision dependencies will be added later when the `vision` package is activated
-
-Important: `docker compose up` now builds the ROS workspace and then leaves the
-`ros2_runtime` container idle. It does not automatically start any ROS node.
-This is intentional so you can start and verify each node one at a time.
+- `docker compose build` rebuilds the Docker image layers
+- the container entrypoint runs `colcon build` each time the container starts
+- `/ros2_ws/build` and `/ros2_ws/install` are cached in named Docker volumes
+- `docker compose up` prepares the workspace but does not automatically start ROS nodes
 
 
-## Raspberry Pi UART Setup
+## First-Time Setup
+
+### 1. Choose the Compose File
+
+From the repository root:
+
+#### Raspberry Pi
+
+```bash
+COMPOSE=ros2_ws/docker/docker-compose.rpi.yml
+```
+
+#### macOS / Windows
+
+```bash
+COMPOSE=ros2_ws/docker/docker-compose.vm.yml
+```
+
+
+### 2. Raspberry Pi UART Setup
 
 If you are using a real Raspberry Pi 5 with the Arduino bridge, enable UART
 first.
-
-Edit `config.txt`:
 
 ```bash
 sudo nano /boot/firmware/config.txt
@@ -132,13 +146,13 @@ enable_uart=1
 dtoverlay=uart0-pi5
 ```
 
-Then disable the serial console in `cmdline.txt`:
+Then remove any serial-console entry from:
 
 ```bash
 sudo nano /boot/firmware/cmdline.txt
 ```
 
-Remove anything like:
+Examples to remove:
 
 ```text
 console=serial0,115200
@@ -151,23 +165,17 @@ Reboot and verify:
 ls -l /dev/ttyAMA0
 ```
 
-You should see a device node similar to:
-
-```text
-crw-rw---- 1 root dialout ... /dev/ttyAMA0
-```
-
-The current bridge runtime uses:
+The current bridge runtime expects:
 
 ```text
 /dev/ttyAMA0 @ 200000 baud
 ```
 
 
-## Build the Frontend First
+### 3. Build the Frontend Once
 
-The bridge serves the built web UI. Build the frontend once before starting the
-ROS container:
+The bridge serves the built web UI. Build the frontend before starting the ROS
+container:
 
 ```bash
 cd nuevo_ui/frontend
@@ -178,55 +186,53 @@ cp -r nuevo_ui/frontend/dist/. nuevo_ui/backend/static/
 ```
 
 
-## 1. Start the Container
+### 4. Start the Container
 
-From the repository root, choose the compose file for your platform.
-
-### Raspberry Pi
+From the repository root:
 
 ```bash
-COMPOSE=ros2_ws/docker/docker-compose.rpi.yml
-docker compose -f $COMPOSE build
-docker compose -f $COMPOSE up -d
-docker compose -f $COMPOSE logs -f ros2_runtime
-```
-
-### macOS / Windows
-
-```bash
-COMPOSE=ros2_ws/docker/docker-compose.vm.yml
 docker compose -f $COMPOSE build
 docker compose -f $COMPOSE up -d
 docker compose -f $COMPOSE logs -f ros2_runtime
 ```
 
 Wait until the log shows that `colcon build` finished and the container is
-ready. After that, leave the container running in the background.
+ready.
 
 
-## 2. Open a Shell Inside the Running Container
+### 5. Enter the Running Container
 
-In a new terminal:
+Use the helper script:
+
+```bash
+./ros2_ws/docker/enter_ros2.sh        # default: rpi
+./ros2_ws/docker/enter_ros2.sh rpi    # real hardware compose file
+./ros2_ws/docker/enter_ros2.sh vm     # mock compose file
+COMPOSE=ros2_ws/docker/docker-compose.rpi.yml ./ros2_ws/docker/enter_ros2.sh
+./ros2_ws/docker/enter_ros2.sh --help
+```
+
+The helper:
+
+- selects the compose file
+- runs `docker compose exec`
+- sources `/opt/ros/jazzy/setup.bash`
+- sources `/ros2_ws/install/setup.bash`
+- drops you into `/ros2_ws`
+
+Manual fallback:
 
 ```bash
 docker compose -f $COMPOSE exec ros2_runtime bash
-```
-
-Inside the container:
-
-```bash
 source /opt/ros/jazzy/setup.bash
 source /ros2_ws/install/setup.bash
 cd /ros2_ws
 ```
 
-At this point, no ROS nodes are running yet. The container is only prepared and
-waiting.
 
+### 6. Sanity Check the Workspace
 
-## 3. Sanity Check the Workspace
-
-Inside the container, verify that the packages and interfaces are available:
+Inside the container:
 
 ```bash
 ros2 pkg list | grep -E 'bridge_interfaces|bridge|robot|sensors|vision'
@@ -241,7 +247,7 @@ Expected result:
 - the message and service definitions print correctly
 
 
-## 4. Start the Bridge Node First
+### 7. Start the Bridge Node First
 
 In the first container shell:
 
@@ -249,45 +255,21 @@ In the first container shell:
 ros2 run bridge bridge
 ```
 
-This starts the integrated ROS bridge, web UI server, and firmware transport.
-
-Expected result in the terminal:
+Expected result:
 
 - the node starts without crashing
 - in real hardware mode, the bridge connects to `/dev/ttyAMA0`
 - in mock mode, the bridge reports mock operation
 
-
-## 5. Verify the Bridge Node
-
-Open a second terminal and enter the same running container:
+Open a second shell and verify:
 
 ```bash
-docker compose -f $COMPOSE exec ros2_runtime bash
-```
-
-Inside that second shell:
-
-```bash
-source /opt/ros/jazzy/setup.bash
-source /ros2_ws/install/setup.bash
-```
-
-Now run:
-
-```bash
+./ros2_ws/docker/enter_ros2.sh rpi
 ros2 node list
 ros2 topic list
 ros2 service list | grep set_firmware_state
 ros2 topic echo /sys_state
 ```
-
-Expected result:
-
-- `/bridge` appears in `ros2 node list`
-- the raw bridge topics exist
-- `/set_firmware_state` exists as a service
-- `/sys_state` starts streaming
 
 You can also verify the web bridge from the host:
 
@@ -296,122 +278,130 @@ curl http://localhost:8000/health
 ```
 
 
-## 6. Test the Firmware State Service
+### 8. Start Other Nodes One by One
 
-From the second container shell, once `/sys_state` shows `IDLE`:
-
-```bash
-ros2 service call /set_firmware_state bridge_interfaces/srv/SetFirmwareState "{target_state: 2}"
-ros2 service call /set_firmware_state bridge_interfaces/srv/SetFirmwareState "{target_state: 1}"
-```
-
-Expected result:
-
-- `target_state: 2` requests `RUNNING` and should succeed from `IDLE`
-- `target_state: 1` requests `IDLE` and should succeed from `RUNNING`
-
-Optional extra checks:
+Example robot node:
 
 ```bash
-ros2 service call /set_firmware_state bridge_interfaces/srv/SetFirmwareState "{target_state: 4}"
-ros2 service call /set_firmware_state bridge_interfaces/srv/SetFirmwareState "{target_state: 1}"
-```
-
-- `target_state: 4` requests `ESTOP`
-- `target_state: 1` should recover back to `IDLE`
-
-
-## 7. Test Continuous Commands
-
-Continuous motor control remains topic-based. First enter `RUNNING`, then send
-a command:
-
-```bash
-ros2 service call /set_firmware_state bridge_interfaces/srv/SetFirmwareState "{target_state: 2}"
-ros2 topic pub --once /dc_set_velocity bridge_interfaces/msg/DCSetVelocity \
-  "{motor_number: 1, target_ticks: 200}"
-```
-
-Expected result:
-
-- the state transition happens through the service
-- the DC command goes through the topic
-- `/dc_state_all` reflects the new target
-
-
-## 8. Start the Other Nodes One by One
-
-The other packages are intentionally started manually so students can see what
-each one does.
-
-### Robot node
-
-In a third shell:
-
-```bash
-docker compose -f $COMPOSE exec ros2_runtime bash
-source /opt/ros/jazzy/setup.bash
-source /ros2_ws/install/setup.bash
+./ros2_ws/docker/enter_ros2.sh rpi
 ros2 run robot robot
 ```
 
-Expected result:
+The `robot` node is the main student application layer. Students only edit
+`src/robot/robot/main.py`. See [ROBOT_NODE_DESIGN.md](src/robot/ROBOT_NODE_DESIGN.md)
+for the API reference.
 
-- the node starts without crashing
-- `ros2 node list` now includes `/robot`
-- the example FSM in `src/robot/robot/main.py` starts and waits in the `IDLE` state
+The `sensors` and `vision` packages can be started the same way when needed.
 
-The robot node is the main student application layer. It exposes a three-layer
-API over the bridge topics:
 
-- **`Robot`** (Layer 1) — full hardware abstraction: DC motors, steppers, servos,
-  LEDs, buttons, IMU, kinematics, and firmware state management
-- **`RobotFSM`** (Layer 2) — base class for writing finite state machines; provides
-  `add_transition()`, `trigger()`, and `spin()`
-- **`PathPlanner` / `PurePursuitPlanner`** (Layer 3) — waypoint-following navigation
+## Daily Workflow
 
-Students edit only `src/robot/robot/main.py` to implement their FSM.
-See [ROBOT_NODE_DESIGN.md](src/robot/ROBOT_NODE_DESIGN.md) for full API reference.
-
-### Sensors node
-
-In another shell:
+### Re-enter the Container
 
 ```bash
-docker compose -f $COMPOSE exec ros2_runtime bash
-source /opt/ros/jazzy/setup.bash
-source /ros2_ws/install/setup.bash
-ros2 run sensors sensor_node
+./ros2_ws/docker/enter_ros2.sh rpi
 ```
 
-Expected result:
-
-- the node starts
-- the log prints `sensors package scaffold ready`
-
-### Vision node
-
-In another shell:
+or:
 
 ```bash
-docker compose -f $COMPOSE exec ros2_runtime bash
-source /opt/ros/jazzy/setup.bash
-source /ros2_ws/install/setup.bash
-ros2 run vision vision_node
+./ros2_ws/docker/enter_ros2.sh vm
 ```
 
-Expected result:
-
-- the node starts
-- the log prints `vision package scaffold ready`
-
-The `robot` node is fully implemented. `sensors` and `vision` are scaffolds
-pending hardware integration.
+This is the normal way to get back into `/ros2_ws` with ROS sourced correctly.
 
 
-## 9. Stop and Reset
+### Restart a Node After Code Changes
 
-Useful commands:
+If the container is already running and you changed only Python code, usually
+you only need to stop the old process and run it again:
+
+```bash
+ros2 run bridge bridge
+ros2 run robot robot
+```
+
+Use `Ctrl+C` to stop a foreground node before restarting it.
+
+
+## Do I Need `colcon build` After Updates?
+
+Not always.
+
+### Usually no rebuild needed
+
+If you changed only Python source and the workspace was built with
+`--symlink-install`, restarting the affected node is usually enough.
+
+Typical examples:
+
+- `ros2_ws/src/bridge/bridge/*.py`
+- `ros2_ws/src/robot/robot/*.py`
+
+
+### Rebuild required
+
+You should rebuild the ROS workspace when you change:
+
+- `.msg` or `.srv` files
+- `package.xml`
+- `CMakeLists.txt`
+- package entry points or install metadata
+- anything that generates code or alters the install tree
+
+Examples:
+
+- adding a new message in `bridge_interfaces/msg`
+- changing `bridge_interfaces/CMakeLists.txt`
+- seeing import errors for a new message that exists in `src/` but not in `install/`
+
+
+### Safe rule of thumb
+
+- Python-only change: try restarting the node first
+- message/service/build-file change: rebuild
+- if the running behavior still looks old: rebuild anyway
+
+
+## Rebuild and Rerun the Entrypoint
+
+### Rerun the entrypoint and reuse the cached ROS build
+
+Use this after normal source edits when the Docker image itself did not change.
+
+```bash
+docker compose -f $COMPOSE restart ros2_runtime
+docker compose -f $COMPOSE logs -f ros2_runtime
+```
+
+This restarts the container, reruns `/entrypoint.sh`, and runs `colcon build`
+again against the existing cached `build/` and `install/` volumes.
+
+
+### Rebuild the Image and Then Rerun the Entrypoint
+
+Use this after Dockerfile, apt, pip, or system dependency changes.
+
+```bash
+docker compose -f $COMPOSE build ros2_runtime
+docker compose -f $COMPOSE up -d --force-recreate ros2_runtime
+docker compose -f $COMPOSE logs -f ros2_runtime
+```
+
+
+### Force a Clean ROS Workspace Rebuild
+
+Use this when generated interfaces changed or the installed ROS artifacts look
+stale.
+
+```bash
+docker compose -f $COMPOSE down -v
+docker compose -f $COMPOSE up -d --build
+docker compose -f $COMPOSE logs -f ros2_runtime
+```
+
+
+## Useful Commands
 
 ```bash
 # Stop the running container
@@ -420,11 +410,30 @@ docker compose -f $COMPOSE down
 # Stop and also clear the ROS build/install cache
 docker compose -f $COMPOSE down -v
 
-# Rebuild the Docker image after dependency changes
+# Rebuild the Docker image
 docker compose -f $COMPOSE build
 
 # View logs from the background container
 docker compose -f $COMPOSE logs -f ros2_runtime
+```
+
+
+## Firmware State and Topic Checks
+
+Once the bridge is running and `/sys_state` shows `IDLE`, you can test the
+firmware state service:
+
+```bash
+ros2 service call /set_firmware_state bridge_interfaces/srv/SetFirmwareState "{target_state: 2}"
+ros2 service call /set_firmware_state bridge_interfaces/srv/SetFirmwareState "{target_state: 1}"
+```
+
+Continuous motor control remains topic-based:
+
+```bash
+ros2 service call /set_firmware_state bridge_interfaces/srv/SetFirmwareState "{target_state: 2}"
+ros2 topic pub --once /dc_set_velocity bridge_interfaces/msg/DCSetVelocity \
+  "{motor_number: 1, target_ticks: 200}"
 ```
 
 
@@ -454,7 +463,7 @@ ros2 run bridge bridge
 - `bridge_interfaces` is the raw firmware and bridge-facing interface package. It is not a node.
 - `bridge` is the ROS package that starts the integrated UI + ROS bridge.
 - `nuevo_bridge` is the shared Python runtime outside `ros2_ws`.
-- `robot` is the main student application layer — it wraps the bridge API and is where FSM logic lives. `sensors` and `vision` are separate packages for future hardware expansion; they are currently scaffolds.
-- `robot`, `sensors`, and `vision` are separate packages because they represent different responsibilities, not because every node needs its own package.
+- `robot` is the main student application layer. It wraps the bridge API and is where FSM logic lives.
+- `sensors` and `vision` are separate packages for future hardware expansion and are currently scaffolds.
 - discrete operations such as firmware state changes should use services
 - continuous commands such as velocity or PWM should stay on topics
