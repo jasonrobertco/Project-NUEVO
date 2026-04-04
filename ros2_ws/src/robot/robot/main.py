@@ -10,12 +10,15 @@ To run:
     ros2 run robot robot
 """
 
+import math
+import time
+
+import numpy as np
+
 from robot.robot import Robot, FirmwareState
 from robot.robot_fsm import RobotFSM
 from robot.hardware_map import Button, DEFAULT_FSM_HZ, LED, Motor
 from robot.path_planner import PurePursuitPlanner
-from robot.path_planner import PurePursuitPlanner2
-import numpy as np
 
 
 # Drive-wheel mapping for this robot build.
@@ -53,6 +56,18 @@ class MyFSM(RobotFSM):
 
     def __init__(self, robot: Robot) -> None:
         super().__init__(robot, initial_state="INIT")
+        self.path = np.array([
+            [0.0, 0.0],
+            [0.0, 500.0],
+            [500.0, 500.0],
+            [500.0, 0.0],
+        ])
+        self.planner = PurePursuitPlanner(
+            lookahead_dist=50.0,
+            max_angular=2.0,
+            goal_tolerance=20.0,
+        )
+        self._next_debug_log_time = 0.0
 
         self.add_transition("INIT",   "ready",     "IDLE",   action=self._on_ready)
         self.add_transition("IDLE",   "to_moving", "MOVING", action=self._on_to_moving)
@@ -75,55 +90,51 @@ class MyFSM(RobotFSM):
         state = self.get_state()
 
         if state == "INIT":
-            # No output — transition happens automatically on the first cycle.
-            # trigger() changes state to IDLE and calls _on_ready() once.
-            self.path = np.array([
-            [0.0, 0.0],
-            [0.0, 500.0],
-            [500.0, 500.0],
-            [500.0, 0.0]
-            ])
-            #self.planner = PurePursuitPlanner2(lookahead_distance=50.0, max_linear_speed=150.0, goal_tolerance=20.0) # mm, mm/s
-            self.planner = PurePursuitPlanner(lookahead_dist=50.0, max_angular=2.0, goal_tolerance=20.0) # mm, rad/s
             self.trigger("ready")
 
         elif state == "IDLE":
-            # This demo only listens to one button in each state, so polling
-            # the current level is enough. Keep LED writes out of update() so
-            # button handling stays responsive and the bridge does not get
-            # flooded with repeated output commands.
-            CurrentX, CurrentY, CurrentTheta = self.robot.get_pose() # Get current pose from the robot (x, y in mm; theta in radians)
-            print(f"IDLE Pose is ({CurrentX:.2f}, {CurrentY:.2f}, {CurrentTheta:.2f} rad).  Press button 1 to start moving.")
-        
             if self.robot.get_button(Button.BTN_1):
                 self.trigger("to_moving")
 
         elif state == "MOVING":
-
-            CurrentX, CurrentY, CurrentTheta = self.robot.get_pose() # Get current pose from the robot (x, y in mm; theta in radians)
-            print(f"MOVING: Current pose is ({CurrentX:.2f}, {CurrentY:.2f}, {CurrentTheta:.2f} rad).")
-            
-            #CurrentPursuitX, CurrentPursuitY = self.planner._lookahead_point(self.path, CurrentX, CurrentY) # Get current lookahead point for debugging
-            CurrentPursuitX, CurrentPursuitY = self.planner._lookahead_point(CurrentX, CurrentY, self.path) # Get current lookahead point for debugging
-            print(f"MOVING: Current lookahead point is ({CurrentPursuitX:.2f}, {CurrentPursuitY:.2f}).")
-            #LinearVelocityCmd, AngularVelocityCmd = self.planner.compute_velocity( # Get velocity command from the planner (linear in mm/s, angular in rad/s)
-            #    path=self.path,
-            #    pose=(CurrentX, CurrentY, CurrentTheta)
-            #)
-            LinearVelocityCmd, AngularVelocityCmd = self.planner.compute_velocity( # Get velocity command from the planner (linear in mm/s, angular in rad/s)
-                pose=(CurrentX, CurrentY, CurrentTheta),
+            current_x, current_y, current_theta_deg = self.robot.get_pose()
+            current_theta_rad = math.radians(current_theta_deg)
+            current_pursuit_x, current_pursuit_y = self.planner._lookahead_point(
+                current_x,
+                current_y,
                 waypoints=self.path,
-                max_linear = 150.0, # mm/s
             )
-            print(f"MOVING: Computed command: {LinearVelocityCmd:.2f} mm/s, {AngularVelocityCmd:.2f} rad/s.")
-            self.robot.set_velocity(LinearVelocityCmd, AngularVelocityCmd) # Send velocity command to the robot. This does NOT change the FSM state.
-            
-            if self.planner.TargetReached(CurrentX, CurrentY, self.path): # Check if the target is reached. If so, trigger transition to IDLE.
+            linear_velocity_cmd, angular_velocity_cmd_rad_s = self.planner.compute_velocity(
+                pose=(current_x, current_y, current_theta_rad),
+                waypoints=self.path,
+                max_linear=150.0,
+            )
+            self.robot.set_velocity(
+                linear_velocity_cmd,
+                math.degrees(angular_velocity_cmd_rad_s),
+            )
+
+            now = time.monotonic()
+            if now >= self._next_debug_log_time:
+                print(
+                    "MOVING: pose=(%.2f, %.2f, %.2f deg / %.2f rad) "
+                    "lookahead=(%.2f, %.2f) command=(%.2f mm/s, %.2f rad/s)"
+                    % (
+                        current_x,
+                        current_y,
+                        current_theta_deg,
+                        current_theta_rad,
+                        current_pursuit_x,
+                        current_pursuit_y,
+                        linear_velocity_cmd,
+                        angular_velocity_cmd_rad_s,
+                    )
+                )
+                self._next_debug_log_time = now + 0.25
+
+            if self.planner.TargetReached(current_x, current_y, self.path):
                 print("MOVING: Target reached! Stopping.")
                 self.trigger("to_idle")
-
-            #if self.robot.get_button(Button.BTN_2):
-            #    self.trigger("to_idle")
 
     # ------------------------------------------------------------------
     # Part 3 — Transition actions (called once, at the moment of change)
@@ -136,13 +147,14 @@ class MyFSM(RobotFSM):
     def _on_ready(self) -> None:
         """Called once when leaving INIT. Starts the firmware."""
         self.robot.set_state(FirmwareState.RUNNING)
+        self.robot.reset_odometry()
+        self.robot.wait_for_pose_update(timeout=0.2)
         self._show_idle_leds()
-        print("[FSM] IDLE")
+        print("[FSM] IDLE (odometry reset)")
 
     def _on_to_moving(self) -> None:
         """Called once when entering MOVING."""
         self._show_moving_leds()
-        self.robot.set_velocity(100, 0.0)  # 100 mm/s forward, 0 deg/s rotation
         print("[FSM] MOVING")
 
     def _on_to_idle(self) -> None:

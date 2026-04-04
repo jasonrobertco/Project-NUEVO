@@ -145,6 +145,29 @@ class RobotApiTests(unittest.TestCase):
         self.assertEqual(len(published), 2)
         self.assertEqual([msg.motor_number for msg in published], [1, 2])
 
+    def test_body_velocity_auto_enables_drive_motors(self) -> None:
+        self.robot.set_velocity(100.0, 0.0)
+
+        published = self.node.publishers["/dc_enable"].published
+        self.assertEqual(len(published), 2)
+        self.assertEqual([msg.motor_number for msg in published], [1, 2])
+        self.assertTrue(all(msg.mode == int(self.hardware_map.DCMotorMode.VELOCITY) for msg in published))
+
+    def test_body_velocity_skips_reenable_when_drive_motors_are_already_enabled(self) -> None:
+        enabled = int(self.hardware_map.DCMotorMode.VELOCITY)
+        self.robot._dc_state = types.SimpleNamespace(
+            motors=[
+                types.SimpleNamespace(mode=enabled),
+                types.SimpleNamespace(mode=enabled),
+                types.SimpleNamespace(mode=0),
+                types.SimpleNamespace(mode=0),
+            ]
+        )
+
+        self.robot.set_velocity(100.0, 0.0)
+
+        self.assertEqual(self.node.publishers["/dc_enable"].published, [])
+
     def test_diff_drive_mapping_is_configurable(self) -> None:
         self.robot.set_drive_wheels(3, 4)
         self.robot.set_velocity(100.0, 0.0)
@@ -223,6 +246,16 @@ class RobotApiTests(unittest.TestCase):
     def test_invalid_pid_loop_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "loop_type must be one of"):
             self.robot.request_pid(1, 2)
+
+    def test_shutdown_stops_and_disables_drive_motors(self) -> None:
+        self.robot.shutdown()
+
+        velocity_msgs = self.node.publishers["/dc_set_velocity"].published
+        disable_msgs = self.node.publishers["/dc_enable"].published
+        self.assertEqual([msg.motor_number for msg in velocity_msgs], [1, 2])
+        self.assertTrue(all(msg.target_ticks == 0 for msg in velocity_msgs))
+        self.assertEqual([msg.motor_number for msg in disable_msgs], [1, 2])
+        self.assertTrue(all(msg.mode == int(self.hardware_map.DCMotorMode.DISABLED) for msg in disable_msgs))
 
     def test_button_edges_are_latched_in_subscription_callback(self) -> None:
         first = self.robot_module.IOInputState()

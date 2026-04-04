@@ -99,8 +99,18 @@ class PurePursuitPlanner(PathPlanner):
     def _lookahead_point(
         self, x: float, y: float, waypoints: list[tuple[float, float]]
     ) -> tuple[float, float]:
-        """Return the first waypoint beyond lookahead_dist, or the last waypoint."""
-        for wx, wy in waypoints:
+        """
+        Return the first forward waypoint beyond the lookahead distance.
+
+        Start from the closest waypoint instead of the first waypoint in the
+        full path so a long-running demo does not snap back toward the origin
+        once the robot has already progressed along the route.
+        """
+        closest_index = min(
+            range(len(waypoints)),
+            key=lambda index: math.hypot(waypoints[index][0] - x, waypoints[index][1] - y),
+        )
+        for wx, wy in waypoints[closest_index:]:
             if math.hypot(wx - x, wy - y) >= self._lookahead:
                 return wx, wy
         return waypoints[-1]

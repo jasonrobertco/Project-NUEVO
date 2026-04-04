@@ -27,6 +27,10 @@ def main(args=None) -> None:
         from robot.main import run
         run(node.robot)
     finally:
+        try:
+            node.robot.shutdown()
+        except Exception as exc:
+            node.get_logger().error(f"robot shutdown failed: {exc}")
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -437,6 +437,24 @@ class Robot:
         self._send_motor_velocity_mm(self._left_wheel_motor, 0.0)
         self._send_motor_velocity_mm(self._right_wheel_motor, 0.0)
 
+    def disable_drive_motors(self) -> None:
+        """Disable the currently configured drive motors."""
+        with self._lock:
+            drive_motors = tuple(dict.fromkeys((self._left_wheel_motor, self._right_wheel_motor)))
+        for motor_id in drive_motors:
+            self.disable_motor(motor_id)
+
+    def shutdown(self) -> None:
+        """
+        Stop navigation and leave the drive motors disabled.
+
+        This is intended for node shutdown so the robot does not keep the
+        configured drive motors armed after the ROS process exits.
+        """
+        self.cancel_motion()
+        self.stop()
+        self.disable_drive_motors()
+
     def set_left_wheel(self, motor_id: int) -> None:
         """Alias for set_odom_left_motor()."""
         self.set_odom_left_motor(motor_id)
@@ -1171,6 +1189,8 @@ class Robot:
             right_motor = self._right_wheel_motor
             left_dir_inverted = self._left_wheel_dir_inverted
             right_dir_inverted = self._right_wheel_dir_inverted
+        if linear_mm_s or angular_rad_s:
+            self._ensure_drive_motors_enabled()
         left_velocity = linear_mm_s - angular_rad_s * half_wb
         right_velocity = linear_mm_s + angular_rad_s * half_wb
         if left_dir_inverted:
@@ -1185,6 +1205,26 @@ class Robot:
         msg.motor_number = motor_id
         msg.target_ticks = int(velocity_mm_s * self._ticks_per_mm)
         self._dc_vel_pub.publish(msg)
+
+    def _ensure_drive_motors_enabled(self) -> None:
+        """Enable the configured drive motors in velocity mode when needed."""
+        with self._lock:
+            drive_motors = tuple(dict.fromkeys((self._left_wheel_motor, self._right_wheel_motor)))
+            dc_state = self._dc_state
+
+        if dc_state is None or not hasattr(dc_state, "motors"):
+            for motor_id in drive_motors:
+                self.enable_motor(motor_id, DCMotorMode.VELOCITY)
+            return
+
+        for motor_id in drive_motors:
+            motor_index = motor_id - 1
+            try:
+                current_mode = dc_state.motors[motor_index].mode
+            except (AttributeError, IndexError, TypeError):
+                current_mode = None
+            if current_mode != int(DCMotorMode.VELOCITY):
+                self.enable_motor(motor_id, DCMotorMode.VELOCITY)
 
 
 # =============================================================================
