@@ -124,7 +124,7 @@ def run(robot: Robot) -> None:
             remaining_path = robot._advance_remaining_path(remaining_path, current_x, current_y, 20.0)
             # Step 4: Use the _lookahead_point() function to calculate the current pursuit point 
             # in your path, defined as (current_pursuit_x, current_pursuit_y)
-            current_pursuit_x, current_pursuit_y = planner1._lookahead_point(remaining_path, current_x, current_y)
+            current_pursuit_x, current_pursuit_y = planner1._lookahead_point(current_x, current_y, waypoints=remaining_path)
             # Step 5: Use the compute_velocity() function of the PurePursuitPlanner 
             # to calculate the linear and angular velocity commands
             linear_mm, angular_rad_s = planner1.compute_velocity((current_x, current_y, current_theta_rad), remaining_path, 80.0)
@@ -141,9 +141,8 @@ def run(robot: Robot) -> None:
             
             # Step 8: Print the current pose and current pursuit point to the console for debugging purposes.
             # Just uncomment the following lines to enable the print statements.
-            #print(f"Current Pose: ({current_x:.1f}, {current_y:.1f}, {current_theta_deg:.1f} deg)")
-            #print(f"Current Pursuit Point: ({current_pursuit_x:.1f}, {current_pursuit_y:.1f})")            
-            print("Finish your code in Task 2") # Delete this line after you finish Task 2
+            print(f"Current Pose: ({current_x:.1f}, {current_y:.1f}, {current_theta_deg:.1f} deg)")
+            print(f"Current Pursuit Point: ({current_pursuit_x:.1f}, {current_pursuit_y:.1f})")            
             
         # FSM refresh rate control
         next_tick += period
