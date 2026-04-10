@@ -137,7 +137,7 @@ def run(robot: Robot) -> None:
             # by advancing it based on the current position (current_x, current_y) and an advance radius(20.0) mm.
             # This will take out the waypoints that are already passed (within 20mm of the current position), 
             # effectively "advancing" the path as the robot moves.
-            remaining_path = robot._advance_remaining_path(remaining_path, current_x, current_y, 20.0)
+            remaining_path = robot._advance_remaining_path(remaining_path, current_x, current_y, LOOKAHEAD_DIST)
             # Step 4: Use the _lookahead_point() function to calculate the current pursuit point 
             # in your path, defined as (current_pursuit_x, current_pursuit_y)
             current_pursuit_x, current_pursuit_y = planner1._lookahead_point(current_x, current_y, waypoints=remaining_path)
