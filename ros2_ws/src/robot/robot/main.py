@@ -32,9 +32,9 @@ WHEEL_BASE = 333.0
 INITIAL_THETA_DEG = 90.0
 
 LEFT_WHEEL_MOTOR = Motor.DC_M1
-LEFT_WHEEL_DIR_INVERTED = False
+LEFT_WHEEL_DIR_INVERTED = True
 RIGHT_WHEEL_MOTOR = Motor.DC_M2
-RIGHT_WHEEL_DIR_INVERTED = True
+RIGHT_WHEEL_DIR_INVERTED = False
 
 
 def configure_robot(robot: Robot) -> None:
@@ -115,7 +115,7 @@ def run(robot: Robot) -> None:
             show_idle_leds(robot)
             print("[FSM] IDLE - Press BTN_1 to enter MOVING state.")
             if robot.get_button(Button.BTN_1):
-                LOOKAHEAD_DIST = 100.0 # Lookahead distance in mm (adjust as needed)
+                LOOKAHEAD_DIST = 50.0 # Lookahead distance in mm (adjust as needed)
                 planner1 = PurePursuitPlanner(
                     lookahead_dist=LOOKAHEAD_DIST, 
                     max_angular=1.5, # Max angular velocity in rad/s (adjust as needed)
