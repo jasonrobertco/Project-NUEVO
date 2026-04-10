@@ -84,9 +84,9 @@ def run(robot: Robot) -> None:
             print("[FSM] INIT (odometry reset)")
             path_control_points = [ #Define your path control points here (x, y) in mm
                 (0.0, 0.0), # 1st point
-                (0.0, 500.0), # 2nd point
-                (500.0, 500.0), # 3rd point
-                (500.0, 0.0), # 4th point
+                (0.0, 610.0), # 2nd point
+                (610.0, 610.0), # 3rd point
+                (610.0, 0.0), # 4th point
                 (0.0, 0.0), # 5th point
             ]    
             path1 = path_control_points
@@ -114,30 +114,30 @@ def run(robot: Robot) -> None:
             """Start your code here"""
             # Step 1: Get current pose, including current coordinates and heading angle in degrees 
             # using robot.get_pose() function. Store the values in current_x, current_y, and current_theta_deg variables. 
-
+            current_x, current_y, current_theta_deg = robot.get_pose()
             # Step 2: Convert current_theta_deg to radians and store it in current_theta_rad variable.  
-
+            current_theta_rad = math.radians(current_theta_deg)
             # Step 3: Use the _advance_remaining_path() function to update the remaining_path variable 
             # by advancing it based on the current position (current_x, current_y) and an advance radius(20.0) mm.
             # This will take out the waypoints that are already passed (within 20mm of the current position), 
             # effectively "advancing" the path as the robot moves.
-
+            remaining_path = robot._advance_remaining_path(remaining_path, current_x, current_y, 20.0)
             # Step 4: Use the _lookahead_point() function to calculate the current pursuit point 
             # in your path, defined as (current_pursuit_x, current_pursuit_y)
-
+            current_pursuit_x, current_pursuit_y = planner1._lookahead_point(remaining_path, current_x, current_y)
             # Step 5: Use the compute_velocity() function of the PurePursuitPlanner 
             # to calculate the linear and angular velocity commands
-
+            linear_mm, angular_rad_s = planner1.compute_velocity((current_x, current_y, current_theta_rad), remaining_path, 80.0)
             # Step 6: Use the robot.set_velocity() function to send the velocity commands to the robot.
-
+            robot.set_velocity(linear_mm, math.degrees(angular_rad_s))
             # Step 7: Check if the current target point is reached using the 
             # CurrentTargetReached() function of the PurePursuitPlanner.
             # Just uncomment the following lines to enable the print statements.
-            """if planner1.CurrentTargetReached(current_pursuit_x, current_pursuit_y, current_x, current_y): 
+            if planner1.CurrentTargetReached(current_pursuit_x, current_pursuit_y, current_x, current_y): 
                 print("MOVING: Target reached! Stopping.")
                 robot.stop()
                 print("[FSM] IDLE")
-                state = "IDLE"       """        
+                state = "IDLE"         
             
             # Step 8: Print the current pose and current pursuit point to the console for debugging purposes.
             # Just uncomment the following lines to enable the print statements.
