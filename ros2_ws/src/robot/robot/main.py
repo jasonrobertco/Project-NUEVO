@@ -83,14 +83,30 @@ def run(robot: Robot) -> None:
             start_robot(robot)
             print("[FSM] INIT (odometry reset)")
             path_control_points = [ #Define your path control points here (x, y) in mm
-                (0.0, 0.0), # 1st point
-                (0.0, 610.0), # 2nd point
-                (610.0, 610.0), # 3rd point
-                (610.0, 0.0), # 4th point
-                (0.0, 0.0), # 5th point
+                (0.0, 0.0),
+                (0.0, 122.0),
+                (0.0, 244.0),
+                (0.0, 366.0),
+                (0.0, 488.0),
+                (0.0, 610.0),
+                (122.0, 610.0),
+                (244.0, 610.0),
+                (366.0, 610.0),
+                (488.0, 610.0),
+                (610.0, 610.0),
+                (610.0, 488.0),
+                (610.0, 366.0),
+                (610.0, 244.0),
+                (610.0, 122.0),
+                (610.0, 0.0),
+                (488.0, 0.0),
+                (366.0, 0.0),
+                (244.0, 0.0),
+                (122.0, 0.0),
+                (0.0, 0.0),
             ]    
-            #path1 = path_control_points
-            path1 = densify_polyline(path_control_points, spacing=20.0)
+            path1 = path_control_points
+            #path1 = densify_polyline(path_control_points, spacing=20.0)
             remaining_path = path1.copy() 
             print("Path is ready, Entering IDLE state.")
             state = "IDLE"
