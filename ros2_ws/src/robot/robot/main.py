@@ -82,15 +82,17 @@ def run(robot: Robot) -> None:
         if state == "INIT":
             start_robot(robot)
             print("[FSM] INIT (odometry reset)")
-            path_control_points = [ #Define your path control points here (x, y) in mm
-                (0.0, 0.0), # 1st point
-                (0.0, 610.0), # 2nd point
-                (610.0, 610.0), # 3rd point
-                (610.0, 0.0), # 4th point
-                (0.0, 0.0), # 5th point
-            ]    
-            path1 = path_control_points
-            #path1 = densify_polyline(path_control_points, spacing=20.0)
+            # Square loop in mm (x, y). Pure pursuit rounds sparse corners because the
+            # lookahead can aim at the next corner; densifying keeps the goal on each edge
+            # so the trace stays straight until each turn.
+            path_control_points = [
+                (0.0, 0.0),
+                (0.0, 610.0),
+                (610.0, 610.0),
+                (610.0, 0.0),
+                (0.0, 0.0),
+            ]
+            path1 = densify_polyline(path_control_points, spacing=25.0)
             remaining_path = path1.copy() 
             print("Path is ready, Entering IDLE state.")
             state = "IDLE"
@@ -99,12 +101,12 @@ def run(robot: Robot) -> None:
             show_idle_leds(robot)
             print("[FSM] IDLE - Press BTN_1 to enter MOVING state.")
             if robot.get_button(Button.BTN_1):
-                LOOKAHEAD_DIST = 100.0 # Lookahead distance in mm (adjust as needed)
+                LOOKAHEAD_DIST = 70.0  # Shorter lookahead → less corner cutting on a square
                 planner1 = PurePursuitPlanner(
-                    lookahead_dist=LOOKAHEAD_DIST, 
-                    max_angular=1.5, # Max angular velocity in rad/s (adjust as needed)
-                    goal_tolerance=20.0, # Distance in mm to consider the target reached (adjust as needed)
-             )
+                    lookahead_dist=LOOKAHEAD_DIST,
+                    max_angular=2.0,  # Allow sharper 90° turns
+                    goal_tolerance=35.0,  # mm; final stop only (see MOVING state)
+                )
                 print("Pure Pursuit Planner is initialized. Start Moving!")
                 print("[FSM] MOVING")
                 state = "MOVING"
