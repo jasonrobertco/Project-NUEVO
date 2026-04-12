@@ -102,6 +102,48 @@ ros2 launch global_gps global_gps.launch.py \
     rover_ids:=[11,12,13]
 ```
 
+### Capture a photo of the camera's field of view
+
+A standalone script is included that saves a single JPEG from the RealSense
+camera without needing the full ROS2 stack running.  It uses `pyrealsense2`
+directly via the libusb/V4L2 backend and automatically repairs missing device
+nodes inside the container after a USB re-enumeration.
+
+**One-time setup** — install `pyrealsense2` inside the container:
+```bash
+docker compose -f $COMPOSE exec global_gps \
+    pip3 install --break-system-packages pyrealsense2
+```
+
+**Capture a photo** (saves to `/tmp/gps_snapshot_<timestamp>.jpg` by default):
+```bash
+# From the Jetson host:
+docker exec docker-global_gps-1 \
+    python3 /ros2_ws/src/global_gps/capture_photo.py
+
+# Or from inside the container shell:
+python3 /ros2_ws/src/global_gps/capture_photo.py
+
+# Custom output path:
+python3 /ros2_ws/src/global_gps/capture_photo.py --output /tmp/field.jpg
+```
+
+The script waits for 15 warm-up frames (~0.5 s) so auto-exposure settles
+before saving.  Additional options:
+
+```
+--output / -o   Output file path
+--warmup        Warm-up frame count (default: 15)
+--width         Stream width  (default: 640)
+--height        Stream height (default: 480)
+--fps           Stream FPS    (default: 30)
+```
+
+> **Note:** The GPS launch (`ros2 launch global_gps global_gps.launch.py`)
+> must **not** be running when you capture a photo — both the launch and the
+> script compete for exclusive camera access.  Stop the launch first, capture,
+> then restart it if needed.
+
 ### Verify detections from any machine on the network
 
 ```bash
