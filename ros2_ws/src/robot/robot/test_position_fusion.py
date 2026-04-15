@@ -60,9 +60,13 @@ from robot.hardware_map import DEFAULT_FSM_HZ
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 
-DRIVE_DISTANCE_MM = 1000.0    # mm — distance between the two marked spots along the robot's initial forward axis
-DRIVE_SPEED_MM_S  = 100.0    # mm/s forward speed
-POS_FUSION_ALPHA  = 0.3       # GPS weight for complementary filter (0–1); tune this
+DRIVE_DISTANCE_MM     = 1000.0   # mm — distance to drive once inside GPS range
+DRIVE_SPEED_MM_S      = 100.0   # mm/s forward speed
+POS_FUSION_ALPHA      = 0.3     # GPS weight for complementary filter (0–1); tune this
+GPS_SEARCH_EXTRA_MM   = 2000.0  # mm — extra distance to drive past DRIVE_DISTANCE_MM
+                                 #       searching for GPS if not yet acquired; set to 0
+                                 #       to disable the extension and stop at DRIVE_DISTANCE_MM
+                                 #       regardless of GPS status.
 
 # ── Plot output path ──────────────────────────────────────────────────────────
 # /host_home is the host $HOME bind-mounted in docker-compose.rpi.yml.
@@ -112,7 +116,22 @@ class _Record:
 # =============================================================================
 
 def _drive_straight(robot: Robot, rec: _Record) -> None:
-    """Drive forward until DRIVE_DISTANCE_MM is reached, recording every tick."""
+    """Drive forward, recording every tick.
+
+    Stopping logic
+    --------------
+    * Normal case (GPS acquired before or during the drive): stop once odometry
+      reports that the robot has travelled DRIVE_DISTANCE_MM *since GPS was first
+      acquired*.  This guarantees at least DRIVE_DISTANCE_MM of fused-vs-odometry
+      comparison data in the plot.
+    * Robot starts outside GPS range: if GPS has not been acquired by the time
+      the robot has driven DRIVE_DISTANCE_MM from the start, keep driving up to
+      GPS_SEARCH_EXTRA_MM more millimetres while looking for GPS coverage.  As
+      soon as GPS is found the DRIVE_DISTANCE_MM countdown restarts from that
+      point.
+    * Safety cap: stop unconditionally at DRIVE_DISTANCE_MM + GPS_SEARCH_EXTRA_MM
+      from the start with a clear warning when GPS was never found.
+    """
     period = 1.0 / float(DEFAULT_FSM_HZ)
 
     # ── Prerequisite: bridge must be running ─────────────────────────────────
@@ -170,14 +189,23 @@ def _drive_straight(robot: Robot, rec: _Record) -> None:
     odom_x = odom_x0
     odom_y = odom_y0
     gps_aligned = False
+    # Odometry position at the moment GPS was first acquired.
+    gps_acq_odom_x = odom_x0
+    gps_acq_odom_y = odom_y0
+    warned_no_gps = False
+    max_dist = DRIVE_DISTANCE_MM + GPS_SEARCH_EXTRA_MM
 
     print(
-        f"[pos_fusion_test] Driving forward {DRIVE_DISTANCE_MM:.0f} mm "
+        f"[pos_fusion_test] Driving in world-Y direction for {DRIVE_DISTANCE_MM:.0f} mm "
         f"at {DRIVE_SPEED_MM_S:.0f} mm/s  alpha={POS_FUSION_ALPHA}\n"
         f"[pos_fusion_test] GPS frame will be translated to match odometry "
         f"at first acquisition.\n"
-        f"[pos_fusion_test] Place start marker at robot origin, end marker "
-        f"{DRIVE_DISTANCE_MM:.0f} mm forward."
+        f"[pos_fusion_test] If GPS is not acquired within {DRIVE_DISTANCE_MM:.0f} mm, "
+        f"the robot will continue up to {GPS_SEARCH_EXTRA_MM:.0f} mm further to find "
+        f"GPS coverage (total cap: {max_dist:.0f} mm)."
+        if GPS_SEARCH_EXTRA_MM > 0 else
+        f"[pos_fusion_test] Driving in world-Y direction for {DRIVE_DISTANCE_MM:.0f} mm "
+        f"at {DRIVE_SPEED_MM_S:.0f} mm/s  alpha={POS_FUSION_ALPHA}"
     )
 
     while True:
@@ -197,10 +225,13 @@ def _drive_straight(robot: Robot, rec: _Record) -> None:
             learned_offset_y = odom_y - gps_y_mm
             robot.set_gps_offset(learned_offset_x, learned_offset_y)
             gps_aligned = True
+            gps_acq_odom_x = odom_x
+            gps_acq_odom_y = odom_y
+            dist_at_acq = math.hypot(odom_x - odom_x0, odom_y - odom_y0)
             print(
-                f"[pos_fusion_test] GPS acquired — learned offset "
-                f"({learned_offset_x:.1f}, {learned_offset_y:.1f}) mm "
-                f"from odometry at first sight."
+                f"[pos_fusion_test] GPS acquired at {dist_at_acq:.0f} mm — learned offset "
+                f"({learned_offset_x:.1f}, {learned_offset_y:.1f}) mm. "
+                f"Driving {DRIVE_DISTANCE_MM:.0f} mm more inside GPS range."
             )
             # Wait for the next tag update so the new offset is reflected in
             # the internal GPS state before recording/using fused position.
@@ -218,8 +249,40 @@ def _drive_straight(robot: Robot, rec: _Record) -> None:
         )
 
         dist_traveled = math.hypot(odom_x - odom_x0, odom_y - odom_y0)
-        if dist_traveled >= DRIVE_DISTANCE_MM:
+
+        # Distance driven since GPS was first acquired (reset when GPS is found
+        # mid-drive so that we always record DRIVE_DISTANCE_MM of comparison data).
+        dist_since_gps = math.hypot(
+            odom_x - gps_acq_odom_x, odom_y - gps_acq_odom_y
+        )
+
+        # ── Stopping conditions ───────────────────────────────────────────────
+        if gps_aligned and dist_since_gps >= DRIVE_DISTANCE_MM:
+            # Driven DRIVE_DISTANCE_MM inside GPS range — primary stop.
             break
+
+        if dist_traveled >= max_dist:
+            # Safety cap: GPS never found within the extended search range.
+            print(
+                f"[pos_fusion_test] WARNING — GPS was never acquired during the "
+                f"{max_dist:.0f} mm drive. The fused position equals raw odometry "
+                f"throughout; no fusion comparison is available in the plot."
+            )
+            break
+
+        # Warn once when the primary distance is passed without GPS.
+        if (
+            GPS_SEARCH_EXTRA_MM > 0
+            and not gps_aligned
+            and not warned_no_gps
+            and dist_traveled >= DRIVE_DISTANCE_MM
+        ):
+            print(
+                f"[pos_fusion_test] GPS not yet acquired at {dist_traveled:.0f} mm. "
+                f"Continuing up to {GPS_SEARCH_EXTRA_MM:.0f} mm more to find GPS "
+                f"coverage…"
+            )
+            warned_no_gps = True
 
         robot.set_velocity(DRIVE_SPEED_MM_S, 0.0)
 
@@ -277,9 +340,10 @@ def _plot_results(rec: _Record) -> None:
     ax_x    = fig.add_subplot(gs[1, 0])
     ax_err  = fig.add_subplot(gs[1, 1])
 
+    total_dist = t[-1] * DRIVE_SPEED_MM_S if len(t) > 1 else DRIVE_DISTANCE_MM
     fig.suptitle(
-        f"Position fusion — forward drive {DRIVE_DISTANCE_MM:.0f} mm  "
-        f"(α={POS_FUSION_ALPHA}, GPS aligned at first acquisition)",
+        f"Position fusion — world-Y drive  "
+        f"(α={POS_FUSION_ALPHA}, GPS acquired {'at start' if gps_active[0] else 'mid-drive' if gps_active.any() else 'never'})",
         fontsize=12,
     )
     gps_patch = mpatches.Patch(color="green", alpha=0.3, label="GPS active")
@@ -289,7 +353,7 @@ def _plot_results(rec: _Record) -> None:
     ax_y.plot(t, odom_y,  lw=1.2, color="steelblue", label="Odometry Y")
     ax_y.plot(t, fused_y, lw=1.5, color="tomato",    linestyle="--", label="Fused Y")
     ax_y.axhline(DRIVE_DISTANCE_MM, color="black", lw=1.0, linestyle=":",
-                 label=f"Target ({DRIVE_DISTANCE_MM:.0f} mm)")
+                 label=f"GPS-range target ({DRIVE_DISTANCE_MM:.0f} mm)")
     ax_y.set_xlabel("time (s)")
     ax_y.set_ylabel("Forward progress (mm)")
     ax_y.set_title("Forward progress toward target (primary)")
@@ -304,7 +368,7 @@ def _plot_results(rec: _Record) -> None:
     ax_traj.plot(fused_x, fused_y, lw=1.5, color="tomato",    linestyle="--", label="Fused path")
     ax_traj.plot(0.0, 0.0,               "go", markersize=8, label="Start marker")
     ax_traj.plot(0.0, DRIVE_DISTANCE_MM, "kx", markersize=10, markeredgewidth=2,
-                 label=f"End marker ({DRIVE_DISTANCE_MM:.0f} mm)")
+                 label=f"GPS-range target ({DRIVE_DISTANCE_MM:.0f} mm)")
     ax_traj.plot(odom_x[-1],  odom_y[-1],  "bs", markersize=7, label="End (odom)")
     ax_traj.plot(fused_x[-1], fused_y[-1], "r^", markersize=7, label="End (fused)")
     ax_traj.set_xlim(-x_range * 1.5, x_range * 1.5)
