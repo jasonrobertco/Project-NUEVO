@@ -1,11 +1,10 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────────────
-# entrypoint.robot.sh — Container entrypoint for the ROS2 robot workspace
+# entrypoint.jetson.sh — Container entrypoint for the Jetson GPS stack
 #
-# Builds the ROS2 workspace on startup, then leaves the container idle so users
-# can start nodes manually with `docker compose exec`.
-# Build artifacts are cached in named Docker volumes (build/ and install/),
-# so only the first startup is slow.
+# Builds only the packages needed on the Jetson (global_gps + its interfaces)
+# and leaves the container idle so the launch file can be started manually.
+# Build artifacts are cached in named Docker volumes.
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
 
@@ -14,7 +13,7 @@ source /opt/ros/jazzy/setup.bash
 echo "[entrypoint] Building ROS2 packages (cached after first run)..."
 colcon build \
     --symlink-install \
-    --packages-select robot sensors bridge bridge_interfaces \
+    --packages-select bridge_interfaces global_gps \
     --cmake-args -DBUILD_TESTING=OFF
 
 source /ros2_ws/install/setup.bash

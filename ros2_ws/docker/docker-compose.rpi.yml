@@ -41,6 +41,9 @@ services:
       # colcon build cache — only slow on first run. Wipe with: docker compose down -v
       - ros2_build:/ros2_ws/build
       - ros2_install:/ros2_ws/install
+      # Host $HOME mounted so nodes can write output files (plots, logs) directly
+      # to the host filesystem. Inside the container it appears as /host_home.
+      - ${HOME}:/host_home
 
     environment:
       # Restrict DDS discovery to loopback — prevents ROS2 nodes from bleeding
