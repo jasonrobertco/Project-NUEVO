@@ -60,8 +60,8 @@ from robot.hardware_map import DEFAULT_FSM_HZ
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 
-DRIVE_DISTANCE_MM     = 100.0   # mm — distance to drive once inside GPS range
-DRIVE_SPEED_MM_S      = 10.0   # mm/s forward speed
+DRIVE_DISTANCE_MM     = 1000.0   # mm — distance to drive once inside GPS range
+DRIVE_SPEED_MM_S      = 100.0   # mm/s forward speed
 POSITION_FUSION_ALPHA      = 1     # GPS weight for complementary filter (0–1); tune this
 GPS_SEARCH_EXTRA_MM   = 2000.0  # mm — extra distance to drive past DRIVE_DISTANCE_MM
                                  #       searching for GPS if not yet acquired; set to 0
@@ -205,7 +205,7 @@ def _drive_straight(robot: Robot, rec: _Record) -> None:
     next_tick = t_start
     odom_x = odom_x0
     odom_y = odom_y0
-    #gps_aligned = False
+    gps_aligned = False
 
     # Odometry position at the moment GPS was first acquired.
     gps_acq_odom_x = odom_x0
