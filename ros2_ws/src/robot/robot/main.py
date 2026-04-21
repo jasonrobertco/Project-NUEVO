@@ -108,6 +108,9 @@ def run(robot: Robot) -> None:
                 print("Pure Pursuit Planner is initialized. Start Moving!")
                 print("[FSM] MOVING")
                 state = "MOVING"
+            if robot.get_button(Button.BTN_2):
+                print("BTN_2 pressed. Stopping robot and saving trajectory.")
+                robot.shutdown()
 
         elif state == "MOVING":
             show_moving_leds(robot)
