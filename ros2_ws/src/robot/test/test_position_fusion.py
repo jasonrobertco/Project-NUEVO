@@ -8,7 +8,7 @@ Tests cover:
   - GPS stale: dead reckoning from last anchor rather than raw odometry
   - Anchor refresh: anchor updates on every fresh GPS tick
   - Alpha extremes: alpha=0 (pure odom) and alpha=1 (pure GPS)
-  - API: set_gps_offset(), set_pos_fusion_alpha() clamping, is_gps_active()
+  - API: set_gps_offset(), set_position_fusion_alpha() clamping, is_gps_active()
 
 No ROS 2 installation is required — all dependencies are stubbed out.
 """
@@ -155,6 +155,7 @@ class PositionFusionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.node = FakeNode()
         self.robot = self.mod.Robot(self.node)
+        self.robot.set_gps_offset(0.0, 0.0)
 
     # ------------------------------------------------------------------
     # Initial state
@@ -259,7 +260,7 @@ class PositionFusionTests(unittest.TestCase):
     def test_alpha_one_fused_snaps_to_gps(self) -> None:
         # With alpha=1 and a GPS fix at (500, 300) mm arena frame (no offset),
         # the fused position must equal the GPS position regardless of odometry.
-        self.robot.set_pos_fusion_alpha(1.0)
+        self.robot.set_position_fusion_alpha(1.0)
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.5, y_m=0.3))
         self.robot._on_kinematics(_make_kin(self.mod, x=0.0, y=0.0))
         x, y, _ = self.robot.get_fused_pose()
@@ -267,7 +268,7 @@ class PositionFusionTests(unittest.TestCase):
         self.assertAlmostEqual(y, 300.0, places=3)
 
     def test_alpha_zero_fused_equals_odometry_despite_gps(self) -> None:
-        self.robot.set_pos_fusion_alpha(0.0)
+        self.robot.set_position_fusion_alpha(0.0)
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.5, y_m=0.3))
         self.robot._on_kinematics(_make_kin(self.mod, x=100.0, y=50.0))
         x, y, _ = self.robot.get_fused_pose()
@@ -280,7 +281,7 @@ class PositionFusionTests(unittest.TestCase):
         odom_x, odom_y = 100.0, 50.0
         gps_x_mm, gps_y_mm = 200.0, 150.0  # GPS frame = arena frame (no offset)
 
-        self.robot.set_pos_fusion_alpha(alpha)
+        self.robot.set_position_fusion_alpha(alpha)
         self.robot._on_tag_detections(
             _make_tag(self.mod, x_m=gps_x_mm / 1000.0, y_m=gps_y_mm / 1000.0)
         )
@@ -301,31 +302,31 @@ class PositionFusionTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_anchor_set_after_first_gps_fix(self) -> None:
-        self.assertFalse(self.robot._anchor_valid)
+        self.assertFalse(self.robot._pos_fusion._anchor_valid)
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.3, y_m=0.2))
         self.robot._on_kinematics(_make_kin(self.mod, x=0.0, y=0.0))
-        self.assertTrue(self.robot._anchor_valid)
+        self.assertTrue(self.robot._pos_fusion._anchor_valid)
 
     def test_anchor_values_match_fused_position(self) -> None:
-        self.robot.set_pos_fusion_alpha(1.0)
+        self.robot.set_position_fusion_alpha(1.0)
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.4, y_m=0.2))
         self.robot._on_kinematics(_make_kin(self.mod, x=50.0, y=30.0))
 
         # With alpha=1 fused snaps to GPS; anchor must equal fused.
         x, y, _ = self.robot.get_fused_pose()
-        self.assertAlmostEqual(self.robot._anchor_x_mm, x, places=4)
-        self.assertAlmostEqual(self.robot._anchor_y_mm, y, places=4)
+        self.assertAlmostEqual(self.robot._pos_fusion._anchor_x_mm, x, places=4)
+        self.assertAlmostEqual(self.robot._pos_fusion._anchor_y_mm, y, places=4)
 
     def test_anchor_updates_on_each_gps_tick(self) -> None:
-        self.robot.set_pos_fusion_alpha(1.0)
+        self.robot.set_position_fusion_alpha(1.0)
 
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.1, y_m=0.0))
         self.robot._on_kinematics(_make_kin(self.mod, x=0.0, y=0.0))
-        anchor_x_first = self.robot._anchor_x_mm
+        anchor_x_first = self.robot._pos_fusion._anchor_x_mm
 
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.3, y_m=0.0))
         self.robot._on_kinematics(_make_kin(self.mod, x=10.0, y=0.0))
-        anchor_x_second = self.robot._anchor_x_mm
+        anchor_x_second = self.robot._pos_fusion._anchor_x_mm
 
         self.assertNotAlmostEqual(anchor_x_first, anchor_x_second, places=2)
         self.assertAlmostEqual(anchor_x_second, 300.0, places=3)
@@ -336,7 +337,7 @@ class PositionFusionTests(unittest.TestCase):
 
     def test_dead_reckoning_no_jump_at_stale_transition(self) -> None:
         # Deliver a GPS fix and establish an anchor.
-        self.robot.set_pos_fusion_alpha(1.0)
+        self.robot.set_position_fusion_alpha(1.0)
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.5, y_m=0.0))
         self.robot._on_kinematics(_make_kin(self.mod, x=0.0, y=0.0))
         x_before, y_before, _ = self.robot.get_fused_pose()
@@ -354,7 +355,7 @@ class PositionFusionTests(unittest.TestCase):
 
     def test_dead_reckoning_tracks_odometry_delta_from_anchor(self) -> None:
         # Anchor at (500, 0) mm with odom at (0, 0).
-        self.robot.set_pos_fusion_alpha(1.0)
+        self.robot.set_position_fusion_alpha(1.0)
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.5, y_m=0.0))
         self.robot._on_kinematics(_make_kin(self.mod, x=0.0, y=0.0))
 
@@ -369,7 +370,7 @@ class PositionFusionTests(unittest.TestCase):
 
     def test_dead_reckoning_is_better_than_raw_odometry(self) -> None:
         # Establish anchor at arena position (500, 0), odom at (100, 0).
-        self.robot.set_pos_fusion_alpha(1.0)
+        self.robot.set_position_fusion_alpha(1.0)
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.5, y_m=0.0))
         self.robot._on_kinematics(_make_kin(self.mod, x=100.0, y=0.0))
 
@@ -385,7 +386,7 @@ class PositionFusionTests(unittest.TestCase):
 
     def test_gps_reacquisition_re_anchors_position(self) -> None:
         # Establish anchor, let GPS go stale, drift in odometry, then re-acquire.
-        self.robot.set_pos_fusion_alpha(1.0)
+        self.robot.set_position_fusion_alpha(1.0)
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.5, y_m=0.0))
         self.robot._on_kinematics(_make_kin(self.mod, x=0.0, y=0.0))
 
@@ -410,29 +411,29 @@ class PositionFusionTests(unittest.TestCase):
         self.assertFalse(self.robot.is_gps_active())
 
     # ------------------------------------------------------------------
-    # set_pos_fusion_alpha() clamping
+    # set_position_fusion_alpha() clamping
     # ------------------------------------------------------------------
 
     def test_fusion_alpha_above_one_clamped(self) -> None:
-        self.robot.set_pos_fusion_alpha(5.0)
-        self.assertAlmostEqual(self.robot._pos_fusion_alpha, 1.0, places=6)
+        self.robot.set_position_fusion_alpha(5.0)
+        self.assertAlmostEqual(self.robot._pos_fusion.alpha, 1.0, places=6)
 
     def test_fusion_alpha_below_zero_clamped(self) -> None:
-        self.robot.set_pos_fusion_alpha(-2.0)
-        self.assertAlmostEqual(self.robot._pos_fusion_alpha, 0.0, places=6)
+        self.robot.set_position_fusion_alpha(-2.0)
+        self.assertAlmostEqual(self.robot._pos_fusion.alpha, 0.0, places=6)
 
     def test_fusion_alpha_boundary_values_accepted(self) -> None:
-        self.robot.set_pos_fusion_alpha(0.0)
-        self.assertAlmostEqual(self.robot._pos_fusion_alpha, 0.0, places=6)
-        self.robot.set_pos_fusion_alpha(1.0)
-        self.assertAlmostEqual(self.robot._pos_fusion_alpha, 1.0, places=6)
+        self.robot.set_position_fusion_alpha(0.0)
+        self.assertAlmostEqual(self.robot._pos_fusion.alpha, 0.0, places=6)
+        self.robot.set_position_fusion_alpha(1.0)
+        self.assertAlmostEqual(self.robot._pos_fusion.alpha, 1.0, places=6)
 
     # ------------------------------------------------------------------
     # get_fused_pose() is consistent with get_pose()
     # ------------------------------------------------------------------
 
     def test_get_fused_pose_matches_get_pose(self) -> None:
-        self.robot.set_pos_fusion_alpha(0.5)
+        self.robot.set_position_fusion_alpha(0.5)
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.4, y_m=0.2))
         self.robot._on_kinematics(_make_kin(self.mod, x=100.0, y=50.0))
 

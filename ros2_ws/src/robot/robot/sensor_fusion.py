@@ -1,24 +1,18 @@
 """
-sensor_fusion.py — pluggable heading-fusion strategies
+sensor_fusion.py — pluggable sensor fusion strategies
 ======================================================
-All strategies share the same interface::
+Orientation strategies share this interface::
 
     fused_theta_rad = strategy.update(odom_theta, mag_heading, linear_vel, angular_vel)
 
-Arguments
----------
-odom_theta   : heading from wheel odometry (radians)
-mag_heading  : absolute heading from the AHRS (radians), or None when the
-               AHRS is not yet calibrated.  Despite the parameter name, this
-               is derived from the Madgwick AHRS quaternion output on the
-               /sensor_imu topic — not raw magnetometer data.
-linear_vel   : magnitude of linear body velocity (mm/s)
-angular_vel  : signed angular velocity from odometry (rad/s)
+Position strategies share this interface::
+
+    fused_x_mm, fused_y_mm = strategy.update(odom_x, odom_y, gps_x, gps_y)
 
 Usage in robot.py / main.py
 ----------------------------
     from robot.sensor_fusion import AdaptiveComplementaryFilter
-    robot.set_fusion_strategy(AdaptiveComplementaryFilter())
+    robot.set_orientation_fusion_strategy(AdaptiveComplementaryFilter())
 """
 
 from __future__ import annotations
@@ -36,16 +30,12 @@ def _wrap(angle: float) -> float:
 # =============================================================================
 
 class SensorFusion:
-    """Abstract base for heading fusion strategies."""
+    """Abstract base for all sensor fusion strategies."""
+    def __init__(self):
+        self.measurement_type = None  # "orientation" or "position"
 
-    def update(
-        self,
-        odom_theta: float,
-        mag_heading: float | None,
-        linear_vel: float,
-        angular_vel: float,
-    ) -> float:
-        """Return fused heading estimate in radians."""
+    def update(self, *args, **kwargs):
+        """Return fused estimate. Subclasses define the exact signature."""
         raise NotImplementedError
 
 
@@ -53,7 +43,7 @@ class SensorFusion:
 # Complementary filter (fixed alpha)
 # =============================================================================
 
-class ComplementaryFilter(SensorFusion):
+class OrientationComplementaryFilter(SensorFusion):
     """
     Fixed-weight complementary filter.
 
@@ -69,8 +59,10 @@ class ComplementaryFilter(SensorFusion):
         Default 0.02 gives gentle long-term drift correction.
     """
 
-    def __init__(self, alpha: float = 0.02) -> None:
+    def __init__(self, alpha: float = 0.0) -> None:
+        super().__init__()
         self.alpha = max(0.0, min(1.0, float(alpha)))
+        self.measurement_type = "orientation"
 
     def update(
         self,
@@ -85,141 +77,62 @@ class ComplementaryFilter(SensorFusion):
 
 
 # =============================================================================
-# Adaptive complementary filter (velocity-dependent alpha)
+# Position complementary filter
 # =============================================================================
 
-class AdaptiveComplementaryFilter(SensorFusion):
+class PositionComplementaryFilter(SensorFusion):
     """
-    Velocity-adaptive complementary filter.
+    Complementary filter for GPS-anchored position fusion.
 
-    The AHRS heading weight decreases as the robot moves faster.  When the
-    robot is nearly stationary, the AHRS heading is very reliable so the
-    weight rises toward ``alpha_max``.  At speed, odometry is more
-    trustworthy short-term, so the weight drops toward ``alpha_min``::
+    Blends GPS (ArUco tag) fixes with wheel odometry using a constant weight::
 
-        motion = |v| / linear_scale  +  |ω| / angular_scale
-        alpha  = alpha_min + (alpha_max - alpha_min) * exp(-motion)
+        fused = odom + alpha * (gps - odom)
 
-    Intuition
-    ---------
-    * Low linear *and* angular velocity  → alpha ≈ alpha_max  (trust AHRS)
-    * High linear *or* angular velocity  → alpha ≈ alpha_min  (trust odom)
-    * linear_scale / angular_scale set the velocity at which the extra AHRS
-      weight decays to exp(−1) ≈ 37 % of its maximum.
+    When GPS is stale, dead-reckons from the last valid fix using the odometry
+    delta so drift only accumulates since the last GPS update. Falls back to
+    raw odometry if no GPS fix has ever been received.
 
     Parameters
     ----------
-    alpha_min     : weight floor at high speed (default 0.005)
-    alpha_max     : weight ceiling at rest (default 0.10)
-    linear_scale  : linear speed (mm/s) where extra AHRS weight is ≈ 37 %
-                    (default 50.0)
-    angular_scale : angular speed (rad/s) where extra AHRS weight is ≈ 37 %
-                    (default 0.3)
+    alpha : float, 0.0–1.0
+        GPS weight.  0 = pure odometry, 1 = snap directly to GPS each tick.
+        Default 0.10.
     """
 
-    def __init__(
-        self,
-        alpha_min: float = 0.005,
-        alpha_max: float = 0.10,
-        linear_scale: float = 50.0,
-        angular_scale: float = 0.3,
-    ) -> None:
-        self.alpha_min = float(alpha_min)
-        self.alpha_max = float(alpha_max)
-        self.linear_scale = max(float(linear_scale), 1e-6)
-        self.angular_scale = max(float(angular_scale), 1e-6)
+    def __init__(self, alpha: float = 0.10) -> None:
+        super().__init__()
+        self.alpha = max(0.0, min(1.0, float(alpha)))
+        self._anchor_x_mm      = 0.0
+        self._anchor_y_mm      = 0.0
+        self._odom_x_at_anchor = 0.0
+        self._odom_y_at_anchor = 0.0
+        self._anchor_valid     = False
+        self.measurement_type = "position"
 
-    def effective_alpha(self, linear_vel: float, angular_vel: float) -> float:
-        """Return the alpha that will be applied at the given velocities."""
-        motion = abs(linear_vel) / self.linear_scale + abs(angular_vel) / self.angular_scale
-        return self.alpha_min + (self.alpha_max - self.alpha_min) * math.exp(-motion)
+    def reset(self) -> None:
+        """Clear anchor — call when odometry is reset."""
+        self._anchor_valid = False
 
     def update(
         self,
-        odom_theta: float,
-        mag_heading: float | None,
-        linear_vel: float,
-        angular_vel: float,
-    ) -> float:
-        if mag_heading is None:
-            return odom_theta
-        alpha = self.effective_alpha(linear_vel, angular_vel)
-        return odom_theta + alpha * _wrap(mag_heading - odom_theta)
+        odom_x: float,
+        odom_y: float,
+        gps_x: float | None,
+        gps_y: float | None,
+    ) -> tuple[float, float]:
+        if gps_x is not None and gps_y is not None:
+            fused_x = odom_x + self.alpha * (gps_x - odom_x)
+            fused_y = odom_y + self.alpha * (gps_y - odom_y)
+            self._anchor_x_mm      = fused_x
+            self._anchor_y_mm      = fused_y
+            self._odom_x_at_anchor = odom_x
+            self._odom_y_at_anchor = odom_y
+            self._anchor_valid     = True
+            return fused_x, fused_y
+        if self._anchor_valid:
+            return (
+                self._anchor_x_mm + (odom_x - self._odom_x_at_anchor),
+                self._anchor_y_mm + (odom_y - self._odom_y_at_anchor),
+            )
+        return odom_x, odom_y
 
-
-# =============================================================================
-# 1-D Kalman filter on heading
-# =============================================================================
-
-class HeadingKalmanFilter(SensorFusion):
-    """
-    1-D Kalman filter for robot heading.
-
-    The odometry heading acts as the process prediction.  The AHRS heading
-    provides noisy absolute measurements to correct accumulated drift.
-
-    Equations
-    ---------
-    Predict  :  θ̂⁻  = odom_theta
-                P⁻   = P + Q
-
-    Update   :  K    = P⁻ / (P⁻ + R)
-                θ̂    = θ̂⁻ + K · wrap(mag_heading − θ̂⁻)
-                P    = (1 − K) · P⁻
-
-    When the AHRS is not yet calibrated only the predict step runs,
-    so the estimate tracks odometry exactly until the first AHRS fix.
-
-    Parameters
-    ----------
-    process_noise     : Q — heading variance added each update (rad²/step).
-                        Larger = trust odometry less and correct drift
-                        faster, but the estimate becomes noisier.
-                        Default 1e-4.
-    measurement_noise : R — AHRS heading variance (rad²).
-                        Larger = trust AHRS less, smoother but slower to
-                        correct drift.  Default 0.05.
-    initial_variance  : P₀ — starting error covariance.  High default (1.0)
-                        means the first AHRS fix is trusted strongly.
-    """
-
-    def __init__(
-        self,
-        process_noise: float = 1e-4,
-        measurement_noise: float = 0.05,
-        initial_variance: float = 1.0,
-    ) -> None:
-        self.Q = float(process_noise)
-        self.R = float(measurement_noise)
-        self._P = float(initial_variance)
-        self._theta_est: float | None = None  # initialized on first update
-
-    @property
-    def variance(self) -> float:
-        """Current error covariance P (rad²). Converges toward Q*R/(Q+R) in steady state."""
-        return self._P
-
-    def update(
-        self,
-        odom_theta: float,
-        mag_heading: float | None,
-        linear_vel: float,
-        angular_vel: float,
-    ) -> float:
-        if self._theta_est is None:
-            self._theta_est = odom_theta
-
-        # Predict: odometry is the process model
-        theta_pred = odom_theta
-        P_pred = self._P + self.Q
-
-        if mag_heading is None:
-            self._theta_est = theta_pred
-            self._P = P_pred
-            return theta_pred
-
-        # Update: fuse with AHRS measurement
-        K = P_pred / (P_pred + self.R)
-        self._theta_est = theta_pred + K * _wrap(mag_heading - theta_pred)
-        self._P = (1.0 - K) * P_pred
-        return self._theta_est

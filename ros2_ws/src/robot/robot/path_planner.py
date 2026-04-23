@@ -139,7 +139,6 @@ class PurePursuitPlanner(PathPlanner):
         return dist_to_target < self.goal_tolerance
 
 
-
 class PurePursuitPlanner2(PathPlanner):
     def __init__(self, lookahead_distance=150.0, max_linear_speed=50.0, goal_tolerance=20.0):
         self.Ld = lookahead_distance

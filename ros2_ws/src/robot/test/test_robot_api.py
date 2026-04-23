@@ -661,7 +661,7 @@ class RobotApiTests(unittest.TestCase):
         self.assertAlmostEqual(self.robot.get_fused_orientation(), math.degrees(0.5), places=6)
 
     def test_get_fused_orientation_blends_mag_heading_when_calibrated(self) -> None:
-        self.robot.set_fusion_alpha(0.2)
+        self.robot.set_orientation_fusion_alpha(0.2)
 
         # _on_imu now extracts heading from the AHRS quaternion, not raw mag.
         # Build a flat-robot quaternion for yaw = π/2 (north):
@@ -690,9 +690,9 @@ class RobotApiTests(unittest.TestCase):
 
     def test_set_fusion_alpha_is_clamped(self) -> None:
         # Alpha is now stored on the fusion strategy object as _fusion.alpha.
-        self.robot.set_fusion_alpha(2.0)
+        self.robot.set_orientation_fusion_alpha(2.0)
         self.assertEqual(self.robot._fusion.alpha, 1.0)
-        self.robot.set_fusion_alpha(-1.0)
+        self.robot.set_orientation_fusion_alpha(-1.0)
         self.assertEqual(self.robot._fusion.alpha, 0.0)
 
 

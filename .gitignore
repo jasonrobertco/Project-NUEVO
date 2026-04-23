@@ -10,6 +10,7 @@ plugins/
 .vscode/
 .local/
 openspec/
+*PLAN.md
 CLAUDE.md
 AGENTS.md
 
