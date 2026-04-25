@@ -106,7 +106,6 @@ def run(robot: Robot) -> None:
         elif state == "IDLE":
             show_idle_leds(robot)
             robot._draw_lidar_obstacles()
-            print("[FSM] IDLE - Press BTN_1 to enter MOVING state.")
             if robot.get_button(Button.BTN_1):
                 print("Start Moving!")
                 print("[FSM] MOVING")

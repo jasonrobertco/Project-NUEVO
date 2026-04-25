@@ -1992,14 +1992,11 @@ class Robot:
     def _nav_follow_path_loop(self, path, period: float):
         with self._lock:
             obstacles = self._obstacles_mm.copy()
-            # NOTE: self._pose is raw odometry (msg.x, msg.y, msg.theta) — NOT the
-            # fused position.  The path waypoints and the world-frame obstacle transform
-            # inside DWAPlanner both rely on this pose.  If the fused position diverges
-            # from raw odometry (e.g. after a GPS anchor snap), the robot will navigate
-            # from the wrong starting point.  Use _get_pose_mm() for a fused pose, but
-            # note that _get_pose_mm() currently also returns self._pose, so both
-            # sources match today.  If GPS/mag fusion ever updates _fused_x_mm and
-            # _fused_y_mm, this should switch to those fused values.
+            # _get_pose_mm() returns (_fused_x_mm, _fused_y_mm, _fused_theta), which
+            # already incorporates GPS/odometry fusion. self._pose is raw odometry and
+            # diverges from the fused position once a GPS anchor is applied, so
+            # DWAPlanner path following should use _get_pose_mm() to avoid navigating
+            # from the wrong starting point.
             pose = self._pose
             vel = self._vel
 
