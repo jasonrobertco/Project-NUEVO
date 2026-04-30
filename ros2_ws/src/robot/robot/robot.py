@@ -10,7 +10,10 @@ from rclpy.node import Node
 
 import time as _time
 
-from robot.sensor_fusion import ComplementaryFilter, SensorFusion
+from robot.sensor_fusion import OrientationComplementaryFilter, PositionComplementaryFilter, SensorFusion
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+import numpy as np
+import matplotlib.pyplot as plt
 
 from bridge_interfaces.msg import (
     DCEnable,
@@ -51,6 +54,7 @@ from bridge_interfaces.msg import (
     TagDetectionArray,
 )
 from bridge_interfaces.srv import SetFirmwareState
+from sensor_msgs.msg import LaserScan
 
 from robot.hardware_map import (
     BUTTON_COUNT,
@@ -171,6 +175,10 @@ class Robot:
     DEFAULT_RIGHT_WHEEL_MOTOR: int = int(Motor.DC_M2)
     DEFAULT_LEFT_WHEEL_DIR_INVERTED: bool = False
     DEFAULT_RIGHT_WHEEL_DIR_INVERTED: bool = True
+    POSITION_ALPHA = 0.10  # complementary filter GPS weight for position fusion
+    ORIENTATION_ALPHA = 0.0  # complementary filter IMU weight for orientation fusion (IMU is not working well, so default to pure odometry for now)
+    TAG_X_OFFSET_MM = 0.0  # ArUco tag position in robot body frame x (mm, forward)
+    TAG_Y_OFFSET_MM = 0.0  # ArUco tag position in robot body frame y (mm, left)
 
     # Servo pulse range (standard hobby servo)
     _SERVO_MIN_US: int = 1000
@@ -213,40 +221,32 @@ class Robot:
         self._imu:        SensorImu      = None
         self._imu_z_down:          bool        = self.IMU_Z_DOWN
         self._ahrs_heading:        float | None = None   # absolute heading from AHRS (rad)
-        self._ahrs_heading_offset: float      = 0.0    # AHRS heading at last reset_odometry()
-        self._ahrs_accumulated:    float      = math.radians(self.INITIAL_THETA_DEG)  # incrementally unwrapped relative heading (rad)
-        self._ahrs_prev_wrapped:   float | None = None  # previous wrap(heading-offset); None = not yet seeded
         self._odom_reset_pending:  bool       = False  # True between reset_odometry() call and firmware-confirmed reset tick
         self._fused_theta:        float      = math.radians(self.INITIAL_THETA_DEG)  # fusion strategy output (rad)
-        self._fusion: SensorFusion           = ComplementaryFilter(alpha=0.02)
+        self._orientation_fusion:  OrientationComplementaryFilter          = OrientationComplementaryFilter(alpha=self.ORIENTATION_ALPHA)
         self._pose:    tuple = (0.0, 0.0, 0.0)  # x_mm, y_mm, theta_rad (raw odometry)
         # ── GPS position fusion ───────────────────────────────────────────────
         self._tracked_tag_id:    int         = -1    # tag to track (-1 = any)
-        self._gps_x_mm:          float       =  0.0  # latest GPS x in mm (arena frame)
-        self._gps_y_mm:          float       =   0.0 # latest GPS y in mm (arena frame)
+        self._gps_x_mm:          float       = 0.0  # latest GPS x in mm (arena frame)
+        self._gps_y_mm:          float       = 0.0  # latest GPS y in mm (arena frame)
         self._gps_last_time:     float       = 0.0   # monotonic timestamp of last GPS fix
         self._gps_timeout_s:     float       = 1.0   # seconds before GPS is treated as stale
         self._gps_offset_x_mm:   float       = 304.8   # GPS frame → arena frame translation x
         self._gps_offset_y_mm:   float       = 1524   # GPS frame → arena frame translation y
-        self._tag_body_offset_x_mm: float    = 0.0   # tag position in robot body frame x (mm, forward)
-        self._tag_body_offset_y_mm: float    = 0.0   # tag position in robot body frame y (mm, left)
+        self._tag_body_offset_x_mm: float    = self.TAG_X_OFFSET_MM   # tag position in robot body frame x (mm, forward)
+        self._tag_body_offset_y_mm: float    = self.TAG_Y_OFFSET_MM   # tag position in robot body frame y (mm, left)
         self._fused_x_mm:        float       = 0.0   # complementary-filter x output (mm)
         self._fused_y_mm:        float       = 0.0   # complementary-filter y output (mm)
-        self._pos_fusion_alpha:  float       = 0.10  # GPS weight [0 = all odometry, 1 = all GPS]
-        # ── GPS-anchored dead reckoning ───────────────────────────────────────
-        self._anchor_x_mm:       float       = 0.0   # last GPS-corrected absolute x (mm)
-        self._anchor_y_mm:       float       = 0.0   # last GPS-corrected absolute y (mm)
-        self._odom_x_at_anchor:  float       = 0.0   # raw odometry x when anchor was set
-        self._odom_y_at_anchor:  float       = 0.0   # raw odometry y when anchor was set
-        self._anchor_valid:      bool        = False  # True once first GPS fix has been received
+        self._pos_fusion:        PositionComplementaryFilter = PositionComplementaryFilter(alpha=self.POSITION_ALPHA)
         self._vel:     tuple = (0.0, 0.0, 0.0)  # vx_mm_s, vy_mm_s, vtheta_rad_s
         self._buttons: int   = 0
         self._limits:  int   = 0
         self._button_edges: int = 0
         self._limit_edges: int = 0
         self._have_io_input: bool = False
-        self._obstacles_mm: list[tuple[float, float]] = []
-        self._obstacle_provider: Callable[[], list[tuple[float, float]]] | None = None
+        self._obstacles_mm: np.ndarray = np.float64([])
+        self._odom_traj: list[tuple[float, float]] = []
+        self._fused_traj: list[tuple[float, float]] = []
 
         # ── Events ────────────────────────────────────────────────────────────
         self._pose_event: threading.Event = threading.Event()
@@ -299,6 +299,9 @@ class Robot:
         node.create_subscription(IOOutputState,    '/io_output_state',   self._on_io_output,   10)
         node.create_subscription(SysOdomParamRsp,  '/sys_odom_param_rsp', self._on_odom_param_rsp,    10)
         node.create_subscription(TagDetectionArray, '/tag_detections',   self._on_tag_detections,    10)
+        node.create_subscription(LaserScan,         '/scan',              self._on_lidar,
+                                 QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                                            history=HistoryPolicy.KEEP_LAST, depth=1))
 
         # ── Service clients ───────────────────────────────────────────────────
         self._set_state_client = node.create_client(SetFirmwareState, '/set_firmware_state')
@@ -382,7 +385,6 @@ class Robot:
                 # computing a delta from a pre-loss value (which may have
                 # jumped when the Madgwick filter reinitialised).
                 self._ahrs_heading = None
-                self._ahrs_prev_wrapped = None
 
     def _on_kinematics(self, msg: SensorKinematics) -> None:
         with self._lock:
@@ -390,64 +392,20 @@ class Robot:
             self._vel  = (msg.vx, msg.vy, msg.v_theta)
 
             # Orientation fusion: delegate to the active strategy.
-            #
-            # The AHRS yaw is an absolute, bounded heading (wrapped to [-π, π]).
-            # The firmware odometry (msg.theta) is unbounded — it accumulates past
-            # 2π for multiple rotations.  Passing the bounded AHRS directly to the
-            # filter causes wrap() discontinuities every half-revolution when
-            # |ahrs - odom| crosses ±π.
-            #
-            # Fix: incrementally unwrap the relative AHRS heading so it accumulates
-            # in the same unbounded frame as odometry.  Their difference then stays
-            # small, and wrap() in the filter is never discontinuous.
+            _initial_theta_rad = math.radians(self._initial_theta_deg)
             if self._ahrs_heading is not None:
-                # If a reset is pending, wait for the firmware-confirmed tick
-                # where msg.theta has snapped to initial_theta_deg before
-                # capturing the AHRS zero reference.  Until then, suppress
-                # AHRS fusion so the filter sees only raw odometry.
-                _initial_theta_rad = math.radians(self._initial_theta_deg)
                 if self._odom_reset_pending:
                     if abs(math.atan2(
                         math.sin(msg.theta - _initial_theta_rad),
                         math.cos(msg.theta - _initial_theta_rad),
                     )) < math.radians(5.0):
-                        # Firmware confirmed the reset — capture AHRS offset
-                        # at this exact tick so both zero references share the
-                        # same physical timestamp.
-                        self._ahrs_heading_offset = self._ahrs_heading
-                        self._ahrs_prev_wrapped   = 0.0  # relative heading is 0 by definition
-                        self._odom_reset_pending  = False
+                        self._odom_reset_pending = False
                         self._odom_reset_event.set()
-                    # Still pending: skip AHRS fusion this tick
                     relative_ahrs = None
                 else:
-                    curr_wrapped = math.atan2(
-                        math.sin(self._ahrs_heading - self._ahrs_heading_offset),
-                        math.cos(self._ahrs_heading - self._ahrs_heading_offset),
-                    )
-                    if self._ahrs_prev_wrapped is None:
-                        # First AHRS sample since startup or after calibration
-                        # loss: seed the accumulator at the current odometry
-                        # level so the filter sees zero initial discrepancy.
-                        # Using msg.theta (not curr_wrapped) keeps both signals
-                        # in the same unbounded reference frame — AHRS then
-                        # contributes only incremental corrections, never an
-                        # absolute compass jump.
-                        self._ahrs_accumulated = msg.theta
-                    else:
-                        delta = math.atan2(
-                            math.sin(curr_wrapped - self._ahrs_prev_wrapped),
-                            math.cos(curr_wrapped - self._ahrs_prev_wrapped),
-                        )
-                        self._ahrs_accumulated += delta
-                    self._ahrs_prev_wrapped = curr_wrapped
-                    relative_ahrs = self._ahrs_accumulated
+                    relative_ahrs = self._ahrs_heading
             else:
-                # AHRS not calibrated — if a reset is pending, check whether
-                # the firmware theta has returned to initial_theta so we can
-                # clear the pending flag (no AHRS offset to capture yet).
                 if self._odom_reset_pending:
-                    _initial_theta_rad = math.radians(self._initial_theta_deg)
                     if abs(math.atan2(
                         math.sin(msg.theta - _initial_theta_rad),
                         math.cos(msg.theta - _initial_theta_rad),
@@ -457,7 +415,7 @@ class Robot:
                 relative_ahrs = None
             linear_vel  = math.hypot(float(msg.vx), float(msg.vy))
             angular_vel = float(msg.v_theta)
-            self._fused_theta = self._fusion.update(
+            self._fused_theta = self._orientation_fusion.update(
                 odom_theta  = msg.theta,
                 mag_heading = relative_ahrs,
                 linear_vel  = linear_vel,
@@ -472,44 +430,23 @@ class Robot:
                 self._gps_last_time > 0.0
                 and (_time.monotonic() - self._gps_last_time) < self._gps_timeout_s
             )
-            if gps_fresh:
-                diff_x = self._gps_x_mm - msg.x
-                diff_y = self._gps_y_mm - msg.y
-                self._fused_x_mm = msg.x + self._pos_fusion_alpha * diff_x
-                self._fused_y_mm = msg.y + self._pos_fusion_alpha * diff_y
-                # Update anchor so dead reckoning continues from the corrected position.
-                self._anchor_x_mm      = self._fused_x_mm
-                self._anchor_y_mm      = self._fused_y_mm
-                self._odom_x_at_anchor = msg.x
-                self._odom_y_at_anchor = msg.y
-                self._anchor_valid     = True
-            elif self._anchor_valid:
-                # GPS stale but we have a prior fix: project from anchor using
-                # odometry delta so drift only accumulates since the last fix.
-                self._fused_x_mm = self._anchor_x_mm + (msg.x - self._odom_x_at_anchor)
-                self._fused_y_mm = self._anchor_y_mm + (msg.y - self._odom_y_at_anchor)
-            else:
-                # No GPS fix ever received; fall back to raw odometry.
-                self._fused_x_mm = msg.x
-                self._fused_y_mm = msg.y
+            gps_x = self._gps_x_mm if gps_fresh else None
+            gps_y = self._gps_y_mm if gps_fresh else None
+            self._fused_x_mm, self._fused_y_mm = self._pos_fusion.update(
+                msg.x, msg.y, gps_x, gps_y
+            )
+            _raw_odom = (float(msg.x), float(msg.y))
+            _raw_fused = (self._fused_x_mm, self._fused_y_mm)
 
+        self._odom_traj.append(_raw_odom)
+        self._fused_traj.append(_raw_fused)
+        self._node.get_logger().info(
+            f"odom=({_raw_odom[0]:.1f}, {_raw_odom[1]:.1f}) mm  "
+            f"fused=({_raw_fused[0]:.1f}, {_raw_fused[1]:.1f}) mm",
+            throttle_duration_sec=0.5,
+        )
         self._pose_event.set()
         self._pose_event.clear()
-
-        # # Publish fused state so external tools (RViz, student nodes, etc.)
-        # # receive corrected position and heading on /fused_kinematics without
-        # # needing to subscribe to the raw /sensor_kinematics themselves.
-        # fused_msg = SensorKinematics()
-        # fused_msg.header    = getattr(msg, 'header', None)
-        # fused_msg.vx        = msg.vx
-        # fused_msg.vy        = msg.vy
-        # fused_msg.v_theta   = msg.v_theta
-        # fused_msg.timestamp = getattr(msg, 'timestamp', 0)
-        # with self._lock:
-        #     fused_msg.x     = self._fused_x_mm
-        #     fused_msg.y     = self._fused_y_mm
-        #     fused_msg.theta = self._fused_theta
-        # self._fused_kin_pub.publish(fused_msg)
 
     def _on_tag_detections(self, msg: TagDetectionArray) -> None:
         """Cache GPS position from the tracked ArUco tag (metres → mm, arena frame)."""
@@ -526,12 +463,8 @@ class Robot:
                     # Correct for tag not being at the robot body origin.
                     # Rotate the body-frame tag offset into arena frame and subtract
                     # so _gps_x/y_mm reflect the robot centre, not the tag centre.
-                    cos_t = math.cos(self._fused_theta)
-                    sin_t = math.sin(self._fused_theta)
-                    bx = self._tag_body_offset_x_mm
-                    by = self._tag_body_offset_y_mm
-                    self._gps_x_mm     = tag_x - (cos_t * bx - sin_t * by)
-                    self._gps_y_mm     = tag_y - (sin_t * bx + cos_t * by)
+                    self._gps_x_mm      = tag_x - self._tag_body_offset_x_mm 
+                    self._gps_y_mm      = tag_y - self._tag_body_offset_y_mm
                     self._gps_last_time = _time.monotonic()
                 # Log outside the lock so a slow or failing logger call cannot
                 # block kinematics callbacks that also acquire the lock.
@@ -580,6 +513,22 @@ class Robot:
             int(msg.right_motor_number),
             bool(msg.right_motor_dir_inverted),
         )
+
+    def _on_lidar(self, msg: LaserScan) -> None:
+        angles = msg.angle_min + np.arange(len(msg.ranges)) * msg.angle_increment
+        ranges = np.array(msg.ranges)
+
+        valid = np.isfinite(ranges) & (ranges > msg.range_min) & (ranges < msg.range_max)
+        angles = angles[valid]
+        ranges = ranges[valid]
+
+        # Convert polar to Cartesian (robot frame, metres -> mm)
+        x = ranges * np.cos(angles)
+        y = ranges * np.sin(angles)
+        with self._lock:
+            self._obstacles_mm = np.float64(
+                np.concatenate([x[:, np.newaxis], y[:, np.newaxis]], axis=1)
+            ) * 1000.0
 
     # =========================================================================
     # System
@@ -643,10 +592,9 @@ class Robot:
             # already snapped back to initial_theta (i.e. firmware confirmed
             # the reset).  That way both zero references share exactly the
             # same physical timestamp.
-            self._ahrs_accumulated  = math.radians(self._initial_theta_deg)
-            self._ahrs_prev_wrapped = None
             self._odom_reset_pending = True
             self._odom_reset_event.clear()
+            self._pos_fusion.reset()
         msg = SysOdomReset()
         msg.flags = 0
         self._odom_pub.publish(msg)
@@ -808,20 +756,20 @@ class Robot:
         code can either call this repeatedly with fresh detections or install a
         live provider with set_obstacle_provider().
         """
-        converted = [
+        converted = np.float64([
             (
                 self._require_finite_float("obstacle_x", obs_x) * self._unit.value,
                 self._require_finite_float("obstacle_y", obs_y) * self._unit.value,
             )
             for obs_x, obs_y in obstacles
-        ]
+        ])
         with self._lock:
             self._obstacles_mm = converted
 
     def clear_obstacles(self) -> None:
         """Clear the cached APF obstacle list set by set_obstacles()."""
         with self._lock:
-            self._obstacles_mm = []
+            self._obstacles_mm = np.float64([])
 
     def get_obstacles(self) -> list[tuple[float, float]]:
         """Return the current APF obstacles in the current user length unit."""
@@ -891,6 +839,7 @@ class Robot:
         time.sleep(self._SHUTDOWN_SETTLE_S)
         if self.get_state() == FirmwareState.RUNNING:
             self.set_state(FirmwareState.IDLE, timeout=1.0)
+        self.save_trajectory_image()
 
     def set_left_wheel(self, motor_id: int) -> None:
         """Alias for set_odom_left_motor()."""
@@ -1619,45 +1568,46 @@ class Robot:
 
         Blends the absolute AHRS heading (corrects long-term drift) with
         the odometry theta (smooth, short-term accurate). The filter weight
-        ``_fusion_alpha`` (default 0.02) controls how quickly the AHRS
+        ``_orientation_fusion_alpha`` (default 0.02) controls how quickly the AHRS
         heading pulls the estimate; it only activates once the firmware reports
         ``mag_calibrated = True``. Before calibration, returns odometry theta.
         """
         with self._lock:
             return math.degrees(self._fused_theta)
 
-    def set_fusion_strategy(self, strategy: SensorFusion) -> None:
+    def set_orientation_fusion_strategy(self, strategy: SensorFusion) -> None:
         """
         Replace the active heading-fusion strategy.
 
-        Any SensorFusion subclass is accepted (ComplementaryFilter,
-        AdaptiveComplementaryFilter, HeadingKalmanFilter, or a custom class).
+        Any SensorFusion subclass is accepted 
         The new strategy takes effect on the next kinematics update.
         """
+        if strategy.measurement_type != "orientation":
+            raise ValueError(f"Orientation fusion strategy must have measurement_type='orientation', but got '{strategy.measurement_type}'")
         with self._lock:
-            self._fusion = strategy
+            self._orientation_fusion = strategy
 
-    def set_fusion_alpha(self, alpha: float) -> None:
+    def set_orientation_fusion_alpha(self, alpha: float) -> None:
         """
         Set the AHRS heading weight for the complementary filter (0.0–1.0).
 
-        Only valid when the active strategy is ComplementaryFilter (the default).
+        Only valid when the active strategy is OrientationComplementaryFilter (the default).
         Raises TypeError if a different strategy is currently active — call
-        set_fusion_strategy(ComplementaryFilter(alpha)) instead.
+        set_orientation_fusion_strategy(OrientationComplementaryFilter(alpha)) instead.
 
         Lower values trust odometry more (less AHRS noise, more drift).
         Higher values correct drift faster but introduce more AHRS noise.
         Default is 0.02.
         """
         with self._lock:
-            if not isinstance(self._fusion, ComplementaryFilter):
+            if not isinstance(self._orientation_fusion, OrientationComplementaryFilter):
                 raise TypeError(
-                    f"set_fusion_alpha() requires the active strategy to be "
-                    f"ComplementaryFilter, but it is "
+                    f"set_orientation_fusion_alpha() requires the active strategy to be "
+                    f"OrientationComplementaryFilter, but it is "
                     f"{type(self._fusion).__name__}. "
-                    "Use set_fusion_strategy(ComplementaryFilter(alpha)) instead."
+                    "Use set_orientation_fusion_strategy(OrientationComplementaryFilter(alpha)) instead."
                 )
-            self._fusion.alpha = max(0.0, min(1.0, float(alpha)))
+            self._orientation_fusion.alpha = max(0.0, min(1.0, float(alpha)))
 
     def set_imu_z_down(self, z_down: bool) -> None:
         """
@@ -1739,7 +1689,19 @@ class Robot:
             self._tag_body_offset_x_mm = float(forward_mm)
             self._tag_body_offset_y_mm = float(left_mm)
 
-    def set_pos_fusion_alpha(self, alpha: float) -> None:
+    def set_position_fusion_strategy(self, strategy: SensorFusion) -> None:
+        """
+        Replace the active position-fusion strategy.
+
+        Any SensorFusion subclass is accepted 
+        The new strategy takes effect on the next kinematics update.
+        """
+        if strategy.measurement_type != "position":
+            raise ValueError(f"Position fusion strategy must have measurement_type='position', but got '{strategy.measurement_type}'")
+        with self._lock:
+            self._pos_fusion = strategy
+    
+    def set_position_fusion_alpha(self, alpha: float) -> None:
         """
         Set the GPS weight for position fusion (0.0–1.0).
 
@@ -1748,7 +1710,39 @@ class Robot:
         Default is 0.10.
         """
         with self._lock:
-            self._pos_fusion_alpha = max(0.0, min(1.0, float(alpha)))
+            self._pos_fusion.alpha = max(0.0, min(1.0, float(alpha)))
+
+    def save_trajectory_image(self, path: str = "trajectory.png") -> None:
+        """Save a PNG comparing raw odometry vs fused trajectory. Requires matplotlib."""
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self._node.get_logger().error("matplotlib not installed; cannot save trajectory image")
+            return
+
+        odom = list(self._odom_traj)
+        fused = list(self._fused_traj)
+        if not odom:
+            self._node.get_logger().warn("No trajectory data to save")
+            return
+
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ox, oy = zip(*odom)
+        ax.plot(ox, oy, label="odometry (raw)", color="steelblue", linewidth=1.5)
+        if fused:
+            fx, fy = zip(*fused)
+            ax.plot(fx, fy, label="fused (GPS+odom)", color="darkorange", linewidth=1.5, linestyle="--")
+        ax.scatter([ox[0]], [oy[0]], color="green", zorder=5, label="start")
+        ax.scatter([ox[-1]], [oy[-1]], color="red", zorder=5, label="end")
+        ax.set_xlabel("x (mm)")
+        ax.set_ylabel("y (mm)")
+        ax.set_title("Trajectory: raw odometry vs fused")
+        ax.legend()
+        ax.set_aspect("equal")
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+        self._node.get_logger().info(f"Trajectory image saved to {path}")
 
     def is_gps_active(self) -> bool:
         """Return True if a GPS fix for the tracked tag arrived within the staleness window."""
@@ -1949,6 +1943,198 @@ class Robot:
         Returns True when the full interval elapsed, False when cancel was requested.
         """
         return not self._nav_cancel.wait(timeout=seconds)
+
+
+    # =========================================================================
+    # Obstacle avoidance — DWA path following  (restored from commit 8894254)
+    # =========================================================================
+
+    def _nav_follow_dwa_path(
+        self,
+        max_vel_mm: float,
+        max_acc_mm: float,
+        max_angular_rad: float,
+        max_angular_acc_rad: float,
+        lookahead_mm: float,
+        advance_radius_mm: float,
+        tolerance_mm: float,
+        gains_of_costs: list,
+        period: float,
+        predict_time: float,
+        predict_velocity_samples_resolution: list,
+        obstacles_range_mm: float,
+        ttc_weight: float,
+    ) -> None:
+        # NOTE (design gap): this method only constructs self.planner and returns
+        # immediately — it does NOT start any navigation loop.  The caller is
+        # expected to drive navigation manually by calling _nav_follow_path_loop()
+        # on every FSM tick (as done in examples/obstacle_avoidance.py).  This is
+        # a non-obvious split: unlike _nav_follow_pure_pursuit_path() which blocks
+        # until the goal is reached, _nav_follow_dwa_path() is a setup-only call.
+        # Consider renaming it _init_dwa_planner() to make the intent explicit.
+        from robot.path_planner import DWAPlanner
+        self.planner = DWAPlanner(
+            lookahead_dist=lookahead_mm,
+            max_linear_speed=max_vel_mm,
+            max_angular_speed=max_angular_rad,
+            max_linear_acc=max_acc_mm,
+            max_angular_acc=max_angular_acc_rad,
+            goal_tolerance=tolerance_mm,
+            gains_of_costs=gains_of_costs,
+            dt=period,
+            predict_time=predict_time,
+            predict_velocity_samples_resolution=predict_velocity_samples_resolution,
+            robot_radius=advance_radius_mm,
+            obstacles_range=obstacles_range_mm,
+            ttc_weight=ttc_weight,
+        )
+
+    def _nav_follow_path_loop(self, path, period: float):
+        with self._lock:
+            obstacles = self._obstacles_mm.copy()
+            # _get_pose_mm() returns (_fused_x_mm, _fused_y_mm, _fused_theta), which
+            # already incorporates GPS/odometry fusion. self._pose is raw odometry and
+            # diverges from the fused position once a GPS anchor is applied, so
+            # DWAPlanner path following should use _get_pose_mm() to avoid navigating
+            # from the wrong starting point.
+            pose = self._pose
+            vel = self._vel
+
+        v, w = self.planner.compute_velocity(path, pose, vel, obstacles, period)
+        # print(f"Computed velocity: linear={v:.1f} mm/s, angular={math.degrees(w):.1f} deg/s")
+        self.set_velocity(v, math.degrees(w))
+        # print(f"Current Pose: ({pose[0]:.1f}, {pose[1]:.1f}, {math.degrees(pose[2]):.1f} deg)")
+
+        if self.planner.TargetReached(path, pose[0], pose[1]):
+            print("MOVING: Target reached! Stopping.")
+            self.stop()
+            return "IDLE"
+
+        return "MOVING"
+
+    def _nav_follow_pp_path(
+        self,
+        lookahead_distance: float,
+        max_linear_speed: float,
+        max_angular_speed: float,
+        goal_tolerance: float,
+        obstacles_range: float,
+        view_angle: float,
+        safe_dist: float,
+        avoidance_delay: int,
+        offset: float,
+        alpha_Ld: float,
+        x_L: float = 0.0,
+        lane_width: float = 600.0,
+        obstacle_avoidance: bool = True,
+    ) -> None:
+
+        from robot.path_planner import PurePursuitPlannerWithAvoidance
+        self.planner = PurePursuitPlannerWithAvoidance(
+            lookahead_distance=lookahead_distance,
+            max_linear_speed=max_linear_speed,
+            max_angular_speed=max_angular_speed,
+            goal_tolerance=goal_tolerance,
+            obstacles_range=obstacles_range,
+            view_angle=view_angle,
+            safe_dist=safe_dist,
+            avoidance_delay=avoidance_delay,
+            offset=offset,
+            x_L=x_L,
+            lane_width=lane_width,
+            alpha_Ld=alpha_Ld,
+            obstacle_avoidance=obstacle_avoidance, 
+        )
+
+    def _nav_follow_pp_path2(
+        self,
+        lookahead_distance: float,
+        max_linear_speed: float,
+        max_angular_speed: float,
+        goal_tolerance: float,
+        obstacles_range: float,
+        safe_dist: float,
+        max_turning_angle: float,
+        avoidance_delay: int,
+        obstacle_buffer_len: int,
+        obstacle_buffer_delay: int,
+        alpha_Ld: float,
+        alpha_Sd: float,
+        alpha_angle: float,
+        obstacle_avoidance: bool = True,
+    ) -> None:
+
+        from robot.path_planner import PurePursuitPlannerWithAvoidance2
+        self.planner = PurePursuitPlannerWithAvoidance2(
+            lookahead_distance=lookahead_distance,
+            max_linear_speed=max_linear_speed,
+            max_angular_speed=max_angular_speed,
+            goal_tolerance=goal_tolerance,
+            obstacles_range=obstacles_range,
+            safe_dist=safe_dist,
+            max_turning_angle=max_turning_angle,
+            avoidance_delay=avoidance_delay,
+            obstacle_buffer_len=obstacle_buffer_len,
+            obstacle_buffer_delay=obstacle_buffer_delay,
+            alpha_Ld=alpha_Ld,
+            alpha_Sd=alpha_Sd,
+            alpha_angle=alpha_angle,
+            obstacle_avoidance=obstacle_avoidance,
+        )
+    
+    def _nav_follow_pp_path_loop(self):
+        with self._lock:
+            obstacles = self._obstacles_mm.copy()
+
+            pose = self._pose
+            # vel = self._vel
+
+        # virtual obstacles
+        # obstacles = np.float64([(0.0,1000.0),])
+        # obstacles = (obstacles-np.float64([[pose[0], pose[1]]]))
+        # obstacles = (np.array([[np.cos(pose[2]), -np.sin(pose[2])], [np.sin(pose[2]), np.cos(pose[2])]]).T @ obstacles.T).T # obstacles in robot frame
+
+        v, w = self.planner.compute_velocity(pose, obstacles)
+        # print(f"Computed velocity: linear={v:.1f} mm/s, angular={math.degrees(w):.1f} deg/s")
+        self.set_velocity(v, math.degrees(w))
+        # print(f"Current Pose: ({pose[0]:.1f}, {pose[1]:.1f}, {math.degrees(pose[2]):.1f} deg)")
+
+        if self.planner.TargetReached(self.planner.remaining_path, pose[0], pose[1]):
+            print("MOVING: Target reached! Stopping.")
+            print(self.planner.remaining_path, pose[0], pose[1])
+            self.stop()
+            return "IDLE"
+
+        return "MOVING"
+
+    def _draw_lidar_obstacles(self):
+        with self._lock:
+             obstacles_mm = self._obstacles_mm.copy()
+             pose = self._pose
+        plt.ion()
+        self.fig, self.ax = plt.subplots()
+        self.ax.clear()
+
+        if obstacles_mm.size != 0:
+            # lidar orientation due to installation is 180 deg rotated from robot forward, so rotate obstacles accordingly
+            lidar_offset_mm = 100.0
+            obstacles = (np.array([[np.cos(np.pi), -np.sin(np.pi)], [np.sin(np.pi), np.cos(np.pi)]]) @ obstacles_mm.T).T + np.array([[lidar_offset_mm, 0],])
+            # since some robot parts (e.g., the arm) may cause obstacles to be detected, we can filter out those obstacles behind the lidar.
+            obstacles = obstacles[obstacles[:,0] > 0,:]
+            # transform obstacles from robot frame to world frame.
+            obstacles = (np.array([[np.cos(pose[2]), -np.sin(pose[2])], [np.sin(pose[2]), np.cos(pose[2])]]) @ obstacles.T).T + np.array([[pose[0], pose[1]],])
+            self.ax.scatter(obstacles[:, 0] / 1000.0, obstacles[:, 1] / 1000.0, s=5)
+        self.ax.set_xlim(-2.5, 2.5)
+        self.ax.set_ylim(-2.5, 2.5)
+        self.ax.set_xlabel("X (m)")
+        self.ax.set_ylabel("Y (m)")
+        self.ax.set_title("LiDAR Scan")
+        self.ax.set_aspect("equal")
+        plt.grid()
+        plt.draw()
+        plt.pause(0.001)
+        plt.savefig("/data/plot.png")
+        plt.close()
 
     # =========================================================================
     # Internal — blocking waits for actuator completion

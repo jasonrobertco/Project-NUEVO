@@ -437,7 +437,12 @@ public:
             return -1;
         }
 
-        scan_pub = this->create_publisher<sensor_msgs::msg::LaserScan>(topic_name, rclcpp::QoS(rclcpp::KeepLast(10)));
+        // Changed from KeepLast(10) to KeepLast(1): publishing faster than the
+        // subscriber can consume caused up to 10 scans to queue in DDS, making
+        // obstacle data stale by several hundred milliseconds.  With depth=1 the
+        // middleware only retains the most recent scan, matching the BEST_EFFORT
+        // + depth=1 subscription in robot.py.
+        scan_pub = this->create_publisher<sensor_msgs::msg::LaserScan>(topic_name, rclcpp::QoS(rclcpp::KeepLast(1)));
 
         stop_motor_service = this->create_service<std_srvs::srv::Empty>("stop_motor",  
                                 std::bind(&RPlidarNode::stop_motor,this,std::placeholders::_1,std::placeholders::_2));

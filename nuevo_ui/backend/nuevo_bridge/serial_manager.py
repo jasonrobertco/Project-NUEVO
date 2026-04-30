@@ -312,6 +312,15 @@ class SerialManager:
         Heartbeats must not depend on the asyncio event loop because heavy
         WebSocket fan-out during RUNNING telemetry can delay the loop long
         enough to trip the Arduino's 500 ms liveness timeout.
+
+        KNOWN ISSUE (CPU contention with rplidar): when the rplidar ROS2 node
+        is running concurrently it processes ~8192 points per scan at 10-20 Hz,
+        creating sustained CPU pressure on the Pi.  Under load, the OS may not
+        wake this thread promptly, allowing consecutive heartbeat misses that
+        exhaust the 500 ms Arduino watchdog (HEARTBEAT_TIMEOUT_MS in config.h)
+        and trigger ERR_LIVENESS_LOST → motors disabled.  Mitigations:
+          - raise HEARTBEAT_TIMEOUT_MS in firmware/arduino/src/config.h, or
+          - increase this thread's OS priority (threading.Thread + os.sched_*).
         """
         print("[Serial] Heartbeat thread started.")
         while self._running:

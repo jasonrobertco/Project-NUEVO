@@ -126,7 +126,7 @@ class _FakeRobot:
     def stop(self) -> None:
         self.stop_count += 1
 
-    def set_pos_fusion_alpha(self, alpha: float) -> None:
+    def set_position_fusion_alpha(self, alpha: float) -> None:
         self.alpha = float(alpha)
 
 

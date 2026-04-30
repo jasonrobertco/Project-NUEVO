@@ -242,7 +242,7 @@ def _plot_results(rec: _Record) -> None:
 # =============================================================================
 
 def run(robot: Robot) -> None:
-    robot.set_fusion_alpha(FUSION_ALPHA)
+    robot.set_orientation_fusion_alpha(ORIENTATION_FUSION_ALPHA)
 
     rec = _Record()
     _spin_in_place(robot, rec)
