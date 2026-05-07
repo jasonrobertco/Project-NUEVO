@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded/exported model artifacts. Keep benchmark code in git, not weights.
+*.pt
+*.onnx
+*.torchscript
+*_ncnn_model/
+*_openvino_model/
+
+# Local benchmark outputs.
+runs/
+samples/

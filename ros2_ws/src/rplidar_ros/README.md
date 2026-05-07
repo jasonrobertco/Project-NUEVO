@@ -1,183 +1,141 @@
-# SLAMTEC LIDAR ROS2 Package
+# RPLidar C1 Driver
 
-ROS2 node for SLAMTEC LIDAR
+This package is the Project NUEVO ROS 2 driver for the Slamtec RPLidar C1.
 
-Visit following Website for more details about SLAMTEC LIDAR:
+It keeps the vendor Slamtec SDK in `sdk/`, but the ROS wrapper is intentionally
+C1-only and small. Higher-level interpretation of `/scan` belongs in the
+`sensors` package.
 
-SLAMTEC LIDAR roswiki: <http://wiki.ros.org/rplidar>
+## Quick Start
 
-SLAMTEC LIDAR HomePage: <http://www.slamtec.com/en/Lidar>
-
-SLAMTEC LIDAR SDK: <https://github.com/Slamtec/rplidar_sdk>
-
-SLAMTEC LIDAR Tutorial: <https://github.com/robopeak/rplidar_ros/wiki>
-
-## Supported SLAMTEC LIDAR
-
-| Lidar Model |
-| ---------------------- |
-|RPLIDAR A1              |
-|RPLIDAR A2              |
-|RPLIDAR A3              |
-|RPLIDAR S1              |
-|RPLIDAR S2              |
-|RPLIDAR S2E             |
-|RPLIDAR S3              |
-|RPLIDAR T1              |
-|RPLIDAR C1              |
-
-## How to install ROS2
-
-[rolling](https://docs.ros.org/en/rolling/Installation.html),
-[humble](https://docs.ros.org/en/humble/Installation.html),
-[galactic](https://docs.ros.org/en/galactic/Installation.html),
-[foxy](https://docs.ros.org/en/foxy/Installation.html)
-
-## How to configuring your ROS 2 environment
-
-[Configuring your ROS 2 environment](https://docs.ros.org/en/foxy/Tutorials/Configuring-ROS2-Environment.html)
-
-## How to Create a ROS2 workspace
-
-[ROS2 Tutorials Creating a workspace](https://docs.ros.org/en/foxy/Tutorials/Workspace/Creating-A-Workspace.html)
-
-1. example, choose the directory name ros2_ws, for "development workspace" :
-
-   ```bash
-   mkdir -p ~/ros2_ws/src
-   cd ~/ros2_ws/src
-   ```
-
-## Compile & Install rplidar_ros package
-
-1. Clone rplidar_ros package from github
-
-   Ensure you're still in the ros2_ws/src directory before you clone:
-
-   ```bash
-   git clone -b ros2 https://github.com/Slamtec/rplidar_ros.git
-   ```
-
-2. Build rpidar_ros package
-
-   From the root of your workspace (ros2_ws), you can now build rplidar_ros package using the command:
-
-   ```bash
-   cd ~/ros2_ws/
-   source /opt/ros/<rosdistro>/setup.bash
-   colcon build --symlink-install
-   ```
-
-   if you find output like "colcon:command not found",you need separate [install colcon](https://docs.ros.org/en/foxy/Tutorials/Colcon-Tutorial.html#install-colcon) build tools.
-
-3. Package environment setup
-
-    ```bash
-    source ./install/setup.bash
-    ```
-
-    Note: Add permanent workspace environment variables.
-    It's convenientif the ROS2 environment variables are automatically added to your bash session every time a new shell is launched:
-
-    ```bash
-    $echo "source <your_own_ros2_ws>/install/setup.bash" >> ~/.bashrc
-    $source ~/.bashrc
-    ```
-
-4. Create udev rules for rplidar
-
-   rplidar_ros running requires the read and write permissions of the serial device.
-   You can manually modify it with the following command:
-
-   ```bash
-   sudo chmod 777 /dev/ttyUSB0
-   ```
-
-   But a better way is to create a udev rule:
-
-   ```bash
-   cd src/rpldiar_ros/
-   source scripts/create_udev_rules.sh
-   ```
-
-## Run rplidar_ros
-
-### Run rplidar node and view in the rviz
-
-The command for RPLIDAR A1 is :
+Run the host setup once on the native Raspberry Pi Ubuntu host:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_a1_launch.py
+./ros2_ws/src/rplidar_ros/scripts/install_udev_rule.sh
 ```
 
-The command for RPLIDAR A2M7 is :
+Unplug and reconnect the RPLidar C1, then verify the stable device path:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_a2m7_launch.py
+ls -l /dev/rplidar
 ```
 
-The command for RPLIDAR A2M8 is :
+If you need to remove the host rule later:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_a2m8_launch.py
+./ros2_ws/src/rplidar_ros/scripts/uninstall_udev_rule.sh
 ```
 
-The command for RPLIDAR A2M12 is :
+Start the driver inside the ROS container:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_a2m12_launch.py
+docker compose -f ros2_ws/docker/docker-compose.rpi.yml exec ros2_runtime bash -lc \
+  'source /ros2_ws/install/setup.bash && ros2 launch rplidar_ros rplidar_c1.launch.py'
 ```
 
-The command for RPLIDAR A3 is :
+In another shell, take one scan sample:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_a3_launch.py
+docker compose -f ros2_ws/docker/docker-compose.rpi.yml exec ros2_runtime bash -lc \
+  'source /ros2_ws/install/setup.bash && ros2 topic echo /scan --once'
 ```
 
-The command for RPLIDAR S1 is :
+## Runtime Behavior
+
+The node publishes:
+
+```text
+scan  sensor_msgs/msg/LaserScan
+```
+
+Defaults:
+
+```text
+serial_port       /dev/rplidar
+serial_baudrate   460800
+frame_id          laser
+topic_name        scan
+scan_mode         Standard
+scan_frequency    10.0
+range_min         0.05
+range_max         12.0
+angle_compensate  true
+```
+
+If `/dev/rplidar` is missing, the node stays alive and retries. This keeps the
+Docker container and launch file healthy when the lidar is optional or unplugged.
+
+## Launch Manually
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_s1_launch.py
+ros2 launch rplidar_ros rplidar_c1.launch.py
 ```
 
-The command for RPLIDAR S1(TCP connection) is :
+Override the device path if needed:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_s1_tcp_launch.py
+ros2 launch rplidar_ros rplidar_c1.launch.py serial_port:=/dev/ttyUSB0
 ```
 
-The command for RPLIDAR S2 is :
+## Udev Rule
+
+The preferred device path is `/dev/rplidar`.
+
+Install the included udev rule on the Raspberry Pi host:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_s2_launch.py
+./ros2_ws/src/rplidar_ros/scripts/install_udev_rule.sh
 ```
 
-The command for RPLIDAR S2E is :
+Unplug and reconnect the lidar, then verify:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_s2e_launch.py
+ls -l /dev/rplidar
 ```
 
-The command for RPLIDAR S3 is :
+Remove the rule if you want to undo the host setup:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_s3_launch.py
+./ros2_ws/src/rplidar_ros/scripts/uninstall_udev_rule.sh
 ```
 
-The command for RPLIDAR T1 is :
+The rule uses the common CP210x USB serial adapter IDs:
+
+```text
+idVendor=10c4
+idProduct=ea60
+```
+
+## Sanity Checks
+
+Inside the ROS container:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_t1_launch.py
+source /ros2_ws/install/setup.bash
+ros2 launch rplidar_ros rplidar_c1.launch.py
 ```
 
-The command for RPLIDAR C1 is :
+In another shell:
 
 ```bash
-ros2 launch rplidar_ros view_rplidar_c1_launch.py
+source /ros2_ws/install/setup.bash
+ros2 node list | grep /rplidar_c1
+ros2 topic echo /scan --once
 ```
 
-Notice: different lidar use different serial_baudrate.
+## Code Ownership
 
-## RPLIDAR frame
+This package should stay focused on hardware I/O and standard `LaserScan`
+publishing. Do not add obstacle detection, global-coordinate transforms, or
+robot-pose fusion here.
 
-RPLIDAR frame must be broadcasted according to picture shown in rplidar-frame.png
+The intended layering is:
+
+```text
+rplidar_ros
+  /scan in laser frame
+
+sensors
+  /scan + robot pose + lidar mounting transform
+  -> robot/world obstacle data
+```

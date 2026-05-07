@@ -39,6 +39,22 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     "PyJWT>=2.8.0,<3.0" \
     "passlib[bcrypt]>=1.7.4"
 
+# ── Camera loopback client deps ──────────────────────────────────────────────
+# The Pi CSI camera is managed by the native Ubuntu host. The ROS container
+# reads the host's v4l2loopback device at /dev/video10.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-opencv \
+        ros-jazzy-v4l2-camera \
+        ffmpeg \
+        v4l-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── NCNN vision runtime ─────────────────────────────────────────────────────
+# Ultralytics is only used outside the robot runtime to export model folders.
+# The container loads model.ncnn.param/bin directly, avoiding torch/torchvision.
+RUN pip3 install --no-cache-dir --break-system-packages --no-deps \
+    ncnn==1.0.20260114
+
 # ── Initialize rosdep ─────────────────────────────────────────────────────────
 RUN rosdep init || true && rosdep update
 

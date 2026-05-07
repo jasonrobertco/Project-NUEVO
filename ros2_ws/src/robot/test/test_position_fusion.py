@@ -4,11 +4,12 @@ test_position_fusion.py — unit tests for GPS-anchored position fusion
 Tests cover:
   - No GPS: fused falls back to raw odometry
   - GPS active: complementary filter blends GPS toward fused position
-  - GPS offset: arena-frame correction applied to raw tag detections
+  - Raw odometry remains available separately from fused/global pose
   - GPS stale: dead reckoning from last anchor rather than raw odometry
   - Anchor refresh: anchor updates on every fresh GPS tick
   - Alpha extremes: alpha=0 (pure odom) and alpha=1 (pure GPS)
-  - API: set_gps_offset(), set_position_fusion_alpha() clamping, is_gps_active()
+  - API: get_odometry_pose(), get_pose(), get_fused_pose(), has_fused_pose(),
+    set_position_fusion_alpha(), is_gps_active()
 
 No ROS 2 installation is required — all dependencies are stubbed out.
 """
@@ -155,16 +156,14 @@ class PositionFusionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.node = FakeNode()
         self.robot = self.mod.Robot(self.node)
-        self.robot.set_gps_offset(0.0, 0.0)
 
     # ------------------------------------------------------------------
     # Initial state
     # ------------------------------------------------------------------
 
-    def test_initial_fused_position_is_zero(self) -> None:
-        x, y, _ = self.robot.get_fused_pose()
-        self.assertAlmostEqual(x, 0.0, places=6)
-        self.assertAlmostEqual(y, 0.0, places=6)
+    def test_initial_fused_position_is_unavailable(self) -> None:
+        self.assertIsNone(self.robot.get_fused_pose())
+        self.assertFalse(self.robot.has_fused_pose())
 
     def test_initial_gps_not_active(self) -> None:
         self.assertFalse(self.robot.is_gps_active())
@@ -173,48 +172,23 @@ class PositionFusionTests(unittest.TestCase):
     # No GPS ever → pure odometry fallback
     # ------------------------------------------------------------------
 
-    def test_no_gps_fused_equals_raw_odometry(self) -> None:
+    def test_no_gps_pose_equals_raw_odometry(self) -> None:
         self.robot._on_kinematics(_make_kin(self.mod, x=300.0, y=150.0))
-        x, y, _ = self.robot.get_fused_pose()
+        x, y, _ = self.robot.get_pose()
         self.assertAlmostEqual(x, 300.0, places=4)
         self.assertAlmostEqual(y, 150.0, places=4)
+        odom = self.robot.get_odometry_pose()
+        self.assertAlmostEqual(odom[0], 300.0, places=4)
+        self.assertAlmostEqual(odom[1], 150.0, places=4)
+        self.assertIsNone(self.robot.get_fused_pose())
+        self.assertFalse(self.robot.has_fused_pose())
 
     def test_no_gps_successive_moves_track_odometry(self) -> None:
         for odom_x in [0.0, 100.0, 250.0, 400.0]:
             self.robot._on_kinematics(_make_kin(self.mod, x=odom_x, y=0.0))
-        x, y, _ = self.robot.get_fused_pose()
+        x, y, _ = self.robot.get_pose()
         self.assertAlmostEqual(x, 400.0, places=4)
         self.assertAlmostEqual(y, 0.0, places=4)
-
-    # ------------------------------------------------------------------
-    # GPS offset
-    # ------------------------------------------------------------------
-
-    def test_set_gps_offset_stores_values(self) -> None:
-        self.robot.set_gps_offset(500.0, 250.0)
-        self.assertAlmostEqual(self.robot._gps_offset_x_mm, 500.0, places=6)
-        self.assertAlmostEqual(self.robot._gps_offset_y_mm, 250.0, places=6)
-
-    def test_gps_offset_applied_to_tag_detection(self) -> None:
-        # GPS reads (0.1 m, 0.05 m) = (100 mm, 50 mm) in GPS frame.
-        # Offset is (400 mm, 200 mm) → arena coords should be (500 mm, 250 mm).
-        self.robot.set_gps_offset(400.0, 200.0)
-        self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.1, y_m=0.05))
-        self.assertAlmostEqual(self.robot._gps_x_mm, 500.0, places=4)
-        self.assertAlmostEqual(self.robot._gps_y_mm, 250.0, places=4)
-
-    def test_zero_offset_emits_warning(self) -> None:
-        # Default offset (0, 0) must trigger a warning on first tag detection.
-        self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.1, y_m=0.1))
-        self.assertTrue(
-            any("offset" in w.lower() or "GPS" in w for w in self.node.warnings),
-            "Expected a GPS offset warning but none was logged",
-        )
-
-    def test_nonzero_offset_suppresses_warning(self) -> None:
-        self.robot.set_gps_offset(100.0, 50.0)
-        self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.1, y_m=0.1))
-        self.assertEqual(len(self.node.warnings), 0)
 
     # ------------------------------------------------------------------
     # Tag body offset rotation (body frame: +x forward, +y left)
@@ -297,6 +271,23 @@ class PositionFusionTests(unittest.TestCase):
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.2, y_m=0.1))
         self.assertTrue(self.robot.is_gps_active())
 
+    def test_get_pose_switches_to_fused_after_first_gps_fix(self) -> None:
+        self.robot.set_position_fusion_alpha(1.0)
+        self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.5, y_m=0.3))
+        self.robot._on_kinematics(_make_kin(self.mod, x=100.0, y=50.0))
+
+        self.assertTrue(self.robot.has_fused_pose())
+        pose = self.robot.get_pose()
+        fused = self.robot.get_fused_pose()
+        odom = self.robot.get_odometry_pose()
+
+        self.assertAlmostEqual(odom[0], 100.0, places=3)
+        self.assertAlmostEqual(odom[1], 50.0, places=3)
+        self.assertAlmostEqual(pose[0], fused[0], places=3)
+        self.assertAlmostEqual(pose[1], fused[1], places=3)
+        self.assertAlmostEqual(pose[0], 500.0, places=3)
+        self.assertAlmostEqual(pose[1], 300.0, places=3)
+
     # ------------------------------------------------------------------
     # Anchor updates
     # ------------------------------------------------------------------
@@ -306,6 +297,7 @@ class PositionFusionTests(unittest.TestCase):
         self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.3, y_m=0.2))
         self.robot._on_kinematics(_make_kin(self.mod, x=0.0, y=0.0))
         self.assertTrue(self.robot._pos_fusion._anchor_valid)
+        self.assertTrue(self.robot.has_fused_pose())
 
     def test_anchor_values_match_fused_position(self) -> None:
         self.robot.set_position_fusion_alpha(1.0)
@@ -410,6 +402,16 @@ class PositionFusionTests(unittest.TestCase):
         self.robot._gps_last_time = 0.0   # simulate stale GPS
         self.assertFalse(self.robot.is_gps_active())
 
+    def test_has_fused_pose_can_remain_true_when_gps_is_stale(self) -> None:
+        self.robot.set_position_fusion_alpha(1.0)
+        self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.5, y_m=0.0))
+        self.robot._on_kinematics(_make_kin(self.mod, x=0.0, y=0.0))
+        self.robot._gps_last_time = 0.0
+        self.robot._on_kinematics(_make_kin(self.mod, x=50.0, y=0.0))
+        self.assertFalse(self.robot.is_gps_active())
+        self.assertTrue(self.robot.has_fused_pose())
+        self.assertIsNotNone(self.robot.get_fused_pose())
+
     # ------------------------------------------------------------------
     # set_position_fusion_alpha() clamping
     # ------------------------------------------------------------------
@@ -429,7 +431,7 @@ class PositionFusionTests(unittest.TestCase):
         self.assertAlmostEqual(self.robot._pos_fusion.alpha, 1.0, places=6)
 
     # ------------------------------------------------------------------
-    # get_fused_pose() is consistent with get_pose()
+    # Pose API consistency
     # ------------------------------------------------------------------
 
     def test_get_fused_pose_matches_get_pose(self) -> None:
@@ -441,6 +443,17 @@ class PositionFusionTests(unittest.TestCase):
         pose  = self.robot.get_pose()
         self.assertAlmostEqual(fused[0], pose[0], places=5)
         self.assertAlmostEqual(fused[1], pose[1], places=5)
+
+    def test_reset_odometry_clears_fused_pose_availability(self) -> None:
+        self.robot.set_position_fusion_alpha(0.5)
+        self.robot._on_tag_detections(_make_tag(self.mod, x_m=0.4, y_m=0.2))
+        self.robot._on_kinematics(_make_kin(self.mod, x=100.0, y=50.0))
+        self.assertTrue(self.robot.has_fused_pose())
+
+        self.robot.reset_odometry()
+
+        self.assertFalse(self.robot.has_fused_pose())
+        self.assertIsNone(self.robot.get_fused_pose())
 
 
 if __name__ == "__main__":

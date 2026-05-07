@@ -2,7 +2,7 @@
 # docker-compose.vm.yml — macOS / Windows development (mock mode)
 #
 # Usage (from Project-NUEVO/ repository root):
-#   docker compose -f ros2_ws/docker/docker-compose.vm.yml up -d
+#   docker compose -f ros2_ws/docker/docker-compose.vm.yml up -d --build --wait
 #
 # Runs in mock mode (NUEVO_MOCK=1) — no Arduino required.
 # Use this for ROS2 learning and development on macOS or Windows.
@@ -40,17 +40,27 @@ services:
       # colcon build cache — only slow on first run. Wipe with: docker compose down -v
       - ros2_build:/ros2_ws/build
       - ros2_install:/ros2_ws/install
+      # Writable runtime artifacts (debug images, plots, logs) live here.
+      - ../../ros2_ws/runtime_output:/runtime_output
 
     environment:
       - NUEVO_BRIDGE_SOURCE=/workspace/nuevo_bridge_source
       - NUEVO_USERS_FILE=/data/users.json
       - NUEVO_MOCK=1
       - NUEVO_MOCK_ODOMETRY=1
+      - NUEVO_MOCK_LIDAR=1
+      # rplidar_ros requires a host library (libfastcdr) not present in the VM
+      # image — exclude it from the VM build. It is built on the real RPi only.
+      - NUEVO_ROS_PACKAGES=robot sensors bridge bridge_interfaces
 
     restart: unless-stopped
 
     healthcheck:
-      test: ["CMD-SHELL", "test -f /ros2_ws/install/setup.bash"]
+      test:
+        [
+          "CMD-SHELL",
+          "bash -lc 'source /opt/ros/jazzy/setup.bash && test -f /ros2_ws/install/setup.bash && source /ros2_ws/install/setup.bash && for package in robot sensors bridge bridge_interfaces; do ros2 pkg prefix \"$$package\" >/dev/null || exit 1; done'",
+        ]
       interval: 10s
       timeout: 5s
       retries: 3

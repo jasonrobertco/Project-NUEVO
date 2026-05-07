@@ -131,6 +131,7 @@ class SerialManager:
         # field is True only when both are True.
         self._last_valid_rx_time: float = 0.0   # monotonic; 0 = never received
         self._arduino_data_ok: bool = False
+        self._data_silent_since: float = 0.0    # monotonic; when silence began
 
     # ------------------------------------------------------------------
     # ROS2 integration hook
@@ -160,6 +161,9 @@ class SerialManager:
             )
             self.connected = True
             self.stats["connected"] = True
+            self._last_valid_rx_time = 0.0
+            self._arduino_data_ok = False
+            self._data_silent_since = time.monotonic()  # start silence clock at connect
             self.message_router.handle_transport_connection_change(True)
             print(f"[Serial] Connected to {SERIAL_PORT} @ {SERIAL_BAUD} baud")
             return True
@@ -189,6 +193,7 @@ class SerialManager:
         self._last_valid_rx_time = now_mono
         if not self._arduino_data_ok:
             self._arduino_data_ok = True
+            self._data_silent_since = 0.0
             self.message_router.handle_transport_connection_change(True)
             if self._asyncio_loop:
                 asyncio.run_coroutine_threadsafe(
@@ -312,15 +317,6 @@ class SerialManager:
         Heartbeats must not depend on the asyncio event loop because heavy
         WebSocket fan-out during RUNNING telemetry can delay the loop long
         enough to trip the Arduino's 500 ms liveness timeout.
-
-        KNOWN ISSUE (CPU contention with rplidar): when the rplidar ROS2 node
-        is running concurrently it processes ~8192 points per scan at 10-20 Hz,
-        creating sustained CPU pressure on the Pi.  Under load, the OS may not
-        wake this thread promptly, allowing consecutive heartbeat misses that
-        exhaust the 500 ms Arduino watchdog (HEARTBEAT_TIMEOUT_MS in config.h)
-        and trigger ERR_LIVENESS_LOST → motors disabled.  Mitigations:
-          - raise HEARTBEAT_TIMEOUT_MS in firmware/arduino/src/config.h, or
-          - increase this thread's OS priority (threading.Thread + os.sched_*).
         """
         print("[Serial] Heartbeat thread started.")
         while self._running:
@@ -379,7 +375,8 @@ class SerialManager:
 
         print("[Serial] Manager started (reader thread is hardware-driven).")
 
-        ARDUINO_DATA_TIMEOUT = 0.500  # seconds
+        ARDUINO_DATA_TIMEOUT = 0.500  # seconds — UI shows disconnected after this
+        ARDUINO_RECONNECT_DELAY = 5.0  # seconds — port closed/reopened after this
 
         try:
             while self._running:
@@ -399,8 +396,29 @@ class SerialManager:
                         f"{ARDUINO_DATA_TIMEOUT * 1000:.0f} ms"
                     )
                     self._arduino_data_ok = False
+                    self._data_silent_since = now_mono
                     self.message_router.handle_transport_connection_change(False)
                     await self._broadcast_stats()
+
+                # ── Port-level reconnect after extended silence ──────────────
+                # Close and reopen the port so the reader thread retries the
+                # handshake. This recovers from Arduino boot-loops and from
+                # cases where the Arduino restarts after a Pi power-cycle.
+                if (self.connected
+                        and not self._arduino_data_ok
+                        and self._data_silent_since > 0
+                        and now_mono - self._data_silent_since > ARDUINO_RECONNECT_DELAY):
+                    print("[Serial] No data for "
+                          f"{ARDUINO_RECONNECT_DELAY:.0f}s — closing port to reconnect")
+                    self._data_silent_since = 0.0
+                    self.connected = False
+                    self.stats["connected"] = False
+                    if self.ser:
+                        try:
+                            self.ser.close()
+                        except Exception:
+                            pass
+                        self.ser = None
 
                 if now - self.last_stats_time >= STATS_INTERVAL:
                     await self._broadcast_stats()

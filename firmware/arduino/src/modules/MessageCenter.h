@@ -178,6 +178,14 @@ public:
     static void cancelDeferredActions();
 
     /**
+     * @brief Schedule a proactive SYS_INFO_RSP + SYS_CONFIG_RSP broadcast.
+     *
+     * Call on IDLE entry so the Pi receives version/config immediately after
+     * an Arduino reset, eliminating the INIT-state race that causes 0.0.0.
+     */
+    static void scheduleSysInfoBroadcast();
+
+    /**
      * @brief Latch the error flags that caused the current ERROR state.
      *
      * Called by SafetyManager BEFORE forceState(ERROR) so the cause is not lost

@@ -40,6 +40,19 @@ node is alive.
 
 ---
 
+## Robot Body Frame
+
+All spatial APIs use a consistent body frame:
+
+- **Origin** — midpoint of the two drive wheels.
+- **+x** — robot forward.
+- **+y** — robot left.
+- **Angles** — CCW positive, 0° = robot forward.
+
+This applies to lidar mount positions, tag body offsets, and obstacle coordinates.
+
+---
+
 ## Firmware State Machine
 
 The Arduino firmware has four states. Motion commands are only processed in
@@ -78,7 +91,7 @@ It blocks until the transition completes or `timeout` seconds pass.
 Most readback methods return the latest cached ROS message. There are two
 kinds of topics that feed these caches:
 
-### Streaming topics — always up to date
+### Streaming topics — always subscribed
 
 These publish continuously at a fixed rate. Calling `get_*()` returns the
 most recent message (or `None` if no message has arrived yet).
@@ -92,14 +105,23 @@ most recent message (or `None` if no message has arrived yet).
 | `/servo_state_all` | 10 Hz | `get_servo_state()` |
 | `/io_input_state` | 50 Hz | `get_button()`, `get_limit()` |
 | `/io_output_state` | 10 Hz | `get_io_output_state()` |
-| `/sensor_imu` | 25 Hz | `get_imu()` |
-| `/sensor_kinematics` | 25 Hz | `get_pose()`, `get_velocity()` |
+| `/sensor_kinematics` | 25 Hz | `get_odometry_pose()`, `get_pose()`, `get_velocity()` |
+
+### Opt-in sensor topics — require enable_*()
+
+These are **not** subscribed by default. Call the matching `enable_*()` method
+once during setup (e.g. in `configure_robot`) before using the related API.
+
+| enable_*() call | Topic subscribed | Related API |
+|-----------------|-----------------|-------------|
+| `enable_lidar()` | `/scan` | `get_obstacles()`, `set_lidar_mount()`, etc. |
+| `enable_gps()` | `/tag_detections` | `is_gps_active()`, `has_fused_pose()`, `get_fused_pose()` |
+| `enable_imu()` | `/sensor_imu` | `get_imu()`, `get_fused_orientation()` |
+| `enable_vision()` | `/vision/detections` | `get_detections()`, `has_detection()`, etc. |
 
 ### On-demand topics — only update after a request
 
-These return `None` until you explicitly request a snapshot. Call the
-`request_*()` method first, then call the `get_*()` getter after a short
-delay (one ROS spin cycle is usually enough).
+These return `None` until you explicitly request a snapshot.
 
 | Request method | Response topic | Getter |
 |----------------|----------------|--------|
@@ -131,6 +153,9 @@ and outputs. It does not affect commands that have already been sent.
 Methods that always use raw millimeters regardless of active unit:
 - `set_wheel_diameter_mm()`
 - `set_wheel_base_mm()`
+- `set_lidar_mount()` — `x_mm`, `y_mm`
+- `set_lidar_filter()` — `range_min_mm`, `range_max_mm`
+- `set_tag_body_offset()` — `x_mm`, `y_mm`
 - `get_odometry_parameters()` return values
 
 The one non-length angle exception: `max_angular_rad_s` in path-following
@@ -232,8 +257,7 @@ and is automatically merged into the local cache. Called automatically at
 construction.
 
 #### `get_odometry_parameters() → dict`
-Returns the local snapshot. **Always in millimeters** regardless of active
-unit.
+Returns the local snapshot. **Always in millimeters** regardless of active unit.
 
 Keys: `wheel_diameter_mm`, `wheel_base_mm`, `initial_theta_deg`,
 `left_motor_number`, `left_motor_dir_inverted`, `right_motor_number`,
@@ -261,13 +285,34 @@ robot.get_right_wheel() → int
 
 ### Pose and Velocity
 
-#### `get_pose() → tuple[float, float, float]`
-Returns `(x, y, theta_deg)` from the latest `/sensor_kinematics` message.
-`x` and `y` are in the current unit. `theta_deg` is always degrees.
+#### `get_odometry_pose() → tuple[float, float, float]`
+Returns raw wheel odometry `(x, y, theta_deg)` in the current unit and degrees.
 
-Returns `(0.0, 0.0, 0.0)` until the first kinematics message arrives. Call
-`wait_for_pose_update()` after `reset_odometry()` to ensure the next
-`get_pose()` reflects the reset.
+This is always the direct `/sensor_kinematics` pose in the local
+odometry-reset frame, without GPS position fusion.
+
+#### `get_pose() → tuple[float, float, float]`
+Returns the current navigation pose `(x, y, theta_deg)` in the current unit
+and degrees.
+
+Before GPS has been incorporated, this is raw odometry. After the first
+accepted GPS fix has been incorporated, this becomes the GPS/odometry fused
+position. `theta_deg` is always the current navigation heading.
+
+Returns `(0.0, 0.0, initial_theta_deg)` until the first kinematics message
+arrives. Call `wait_for_pose_update()` after `reset_odometry()` to ensure
+the next `get_pose()` reflects the reset.
+
+#### `has_fused_pose() → bool`
+Returns `True` once GPS has been incorporated into the position filter.
+
+This can remain `True` while `is_gps_active()` is `False`, because the filter
+can continue dead-reckoning from the last fused anchor while GPS is
+temporarily stale.
+
+#### `get_fused_pose() → tuple[float, float, float] | None`
+Returns the fused navigation pose, or `None` if GPS has not been incorporated
+yet.
 
 #### `get_velocity() → tuple[float, float, float]`
 Returns `(vx, vy, v_theta_deg_s)`. Derived from wheel encoder differentials
@@ -276,8 +321,15 @@ at 25 Hz. `vx` / `vy` in current unit/s; `v_theta_deg_s` in degrees/s.
 #### `wait_for_pose_update(timeout: float = None) → bool`
 Blocks until the next `/sensor_kinematics` tick (nominally 25 Hz).
 Returns `True` if a message arrived within `timeout`, `False` on timeout.
-Use after `reset_odometry()` to confirm the pose has been zeroed before
-issuing a motion command.
+
+#### `wait_for_odometry_reset(timeout: float = 2.0) → bool`
+Blocks until the firmware confirms the odometry reset (theta ≈ initial_theta).
+Call this after `reset_odometry()` instead of multiple `wait_for_pose_update()`
+calls to guarantee the initial-heading capture has happened.
+Returns `True` if confirmed within timeout, `False` on timeout.
+
+#### `save_trajectory_image(path: str = "trajectory.png") → None`
+Save a PNG comparing raw odometry vs fused trajectory. Requires `matplotlib`.
 
 ---
 
@@ -354,13 +406,42 @@ the robot from decelerating at every intermediate waypoint.
 
 #### `apf_follow_path(waypoints, velocity, lookahead, tolerance, repulsion_range, blocking=True, max_angular_rad_s=1.0, repulsion_gain=500.0, timeout=None, *, advance_radius=None) → MotionHandle`
 Same as `purepursuit_follow_path` plus obstacle avoidance via artificial
-potential fields. Obstacle data comes from `set_obstacles()` and/or
-`set_obstacle_provider()`.
+potential fields. The current APF runtime uses tracked world-frame obstacle
+disks derived from lidar, not the raw point cloud.
 
 Additional parameters:
+- `lookahead` — currently retained only for API compatibility; the current APF
+  planner does not use it
 - `repulsion_range` — obstacle influence radius in current unit
 - `repulsion_gain` — repulsion force scale (default 500.0; increase to push
   harder away from obstacles)
+
+#### `lapf_to_goal(x, y, velocity, tolerance, leash_length_mm=None, repulsion_range_mm=None, target_speed_mm_s=None, blocking=True, max_angular_rad_s=1.0, repulsion_gain=None, attraction_gain=None, force_ema_alpha=None, inflation_margin_mm=None, leash_half_angle_deg=None, timeout=None) → MotionHandle`
+Navigate to one goal using a leashed APF virtual target.
+
+The planner runs a point-APF simulation on a virtual target in world frame,
+then drives the real robot toward that moving target using a single-point
+pure-pursuit-style controller. The virtual target is clamped inside a forward
+leash cone relative to the robot.
+
+Key parameters:
+- `leash_length_mm` — maximum robot-to-virtual-target distance in mm
+- `leash_half_angle_deg` — forward cone half-angle for the virtual target
+- `target_speed_mm_s` — virtual-target integration speed in mm/s
+- `repulsion_range_mm` — APF obstacle influence radius in mm
+- `repulsion_gain` — APF obstacle repulsion strength
+- `attraction_gain` — APF goal attraction strength
+- `force_ema_alpha` — exponential smoothing factor for the APF force vector
+- `inflation_margin_mm` — constant obstacle inflation margin applied to tracked
+  obstacle disks before the virtual target reacts to them
+
+All `_mm` / `_mm_s` values above are explicit raw-millimeter tuning
+parameters. They default to the Robot class LAPF constants when left as
+`None`.
+
+#### `get_virtual_target() → tuple[float, float] | None`
+Returns the current world-frame virtual target in the current unit, or `None`
+when no LAPF motion is active.
 
 #### `is_moving() → bool`
 Returns `True` if a navigation background thread is active.
@@ -381,13 +462,23 @@ Store a static obstacle list in the robot frame. Each entry is
 Clears the obstacle list.
 
 #### `get_obstacles() → list[tuple[float, float]]`
-Returns the cached obstacles in the current unit.
+Returns the cached obstacles in the current unit. When `enable_lidar()` is
+active, this reflects the latest filtered lidar scan in robot body frame.
+
+#### `get_obstacle_tracks(include_unconfirmed=False) → list[dict]`
+Returns tracked obstacle disks in world frame. Each entry includes:
+- `id`
+- `x`
+- `y`
+- `radius`
+- `hits`
+
+These are the obstacle tracks currently used by APF when lidar-based obstacle
+avoidance is active.
 
 #### `set_obstacle_provider(provider: Callable | None) → None`
 Install a live callback that returns robot-frame obstacle positions in **mm**
 (not the current user unit). Called by the APF planner on each control tick.
-Use this to feed real-time lidar or object-detection data without polling the
-student FSM.
 
 ```python
 def my_lidar_obstacles() -> list[tuple[float, float]]:
@@ -395,6 +486,179 @@ def my_lidar_obstacles() -> list[tuple[float, float]]:
 
 robot.set_obstacle_provider(my_lidar_obstacles)
 ```
+
+---
+
+### Lidar
+
+Requires `enable_lidar()` before first use.
+
+#### `enable_lidar() → None`
+Subscribe to `/scan` (RPLIDAR C1 driver). From this point on, each incoming
+scan is filtered and stored as robot-body-frame obstacle points accessible via
+`get_obstacles()`.
+
+#### `set_lidar_mount(x_mm, y_mm, theta_deg=0.0) → None`
+Describe the lidar's physical installation in the robot body frame.
+
+- `x_mm` — forward offset from the wheel midpoint (positive = forward).
+- `y_mm` — lateral offset from the wheel midpoint (positive = left).
+- `theta_deg` — heading offset relative to robot +x forward (CCW positive).
+  Use `180.0` if the lidar faces backward.
+
+Applied on every scan so scan points are expressed in the robot body frame.
+Default: `(0, 0, 0)` — lidar at the body origin, facing forward.
+
+#### `set_lidar_filter(range_min_mm=None, range_max_mm=None, fov_deg=None) → None`
+Tune the per-scan point filter. Pass only the parameters you want to change.
+
+- `range_min_mm` — discard points closer than this to the **lidar origin** (default 150 mm).
+- `range_max_mm` — discard points farther than this from the **lidar origin** (default 6000 mm).
+- `fov_deg` — `(min_deg, max_deg)` window in the robot-aligned frame, centred
+  on the lidar origin. `0°` = robot +x forward, CCW positive.
+  Example: `(-90, 90)` keeps only the front hemisphere.
+  Default: `(-180, 180)` keeps the full scan.
+
+**Filter order** (applied each scan):
+1. Rotate lidar measurement by mount `theta_deg`.
+2. Apply FOV window — angles relative to the lidar origin.
+3. Apply range filter — distance from the lidar origin.
+4. Translate by mount `(x_mm, y_mm)` to body origin.
+
+#### `start_lidar_world_publisher(topic='/lidar_world_points', hz=10.0) → None`
+Start a ROS timer that continuously publishes obstacle points transformed to
+the world frame on `topic`. The timer runs on the ROS spin thread, so it
+fires independently of whatever the user FSM is doing — including during
+blocking navigation calls.
+
+Transform each tick: body-frame obstacles → rotate by fused heading →
+translate by fused position.
+
+Call `stop_lidar_world_publisher()` to cancel. Calling this again with
+different arguments replaces the existing publisher/timer.
+
+#### `stop_lidar_world_publisher() → None`
+Cancel the world-frame publisher.
+
+---
+
+### GPS / ArUco Tag Positioning
+
+Requires `enable_gps()` before first use.
+
+#### `enable_gps() → None`
+Subscribe to `/tag_detections`. From this point on, detected ArUco tag
+positions are fused into the position estimate returned by `get_pose()`.
+
+#### `is_gps_active() → bool`
+Returns `True` if a GPS fix for the tracked tag arrived within the staleness
+window (default 1 second). Use this to check whether `get_pose()` position
+is GPS-corrected or pure odometry.
+
+#### `set_tracked_tag_id(tag_id: int) → None`
+Set which ArUco tag ID is used for GPS fusion. Pass `-1` (default) to accept
+any tag from `/tag_detections`.
+
+#### `get_tracked_tag_id() → int`
+Return the currently tracked tag ID.
+
+#### `set_gps_offset(offset_x_mm, offset_y_mm) → None`
+Apply a fixed translation from GPS frame to arena frame (mm).
+
+```
+arena_x = gps_x + offset_x
+arena_y = gps_y + offset_y
+```
+
+Measure once by driving to a known arena position, reading the GPS fix, and
+computing `offset = arena_pos − gps_pos`.
+
+#### `set_tag_body_offset(x_mm, y_mm) → None`
+Correct for the ArUco tag not being at the robot body origin.
+
+- `x_mm` — tag x position in body frame (positive = forward of wheel midpoint).
+- `y_mm` — tag y position in body frame (positive = left of wheel midpoint).
+
+The correction is applied on each detection by rotating the body-frame offset
+into the arena frame using the current fused heading. Default: `(0, 0)`.
+
+#### `set_position_fusion_alpha(alpha: float) → None`
+Set the GPS weight for position fusion (0.0–1.0).
+
+- `0.0` — trust odometry only (GPS ignored even when available).
+- `1.0` — snap position directly to GPS each kinematics tick.
+- Default: `0.10`.
+
+#### `set_position_fusion_strategy(strategy: SensorFusion) → None`
+Replace the active position-fusion strategy with any `SensorFusion` subclass.
+
+---
+
+### IMU and Orientation Fusion
+
+Requires `enable_imu()` before first use.
+
+#### `enable_imu() → None`
+Subscribe to `/sensor_imu`. From this point on, the AHRS quaternion is
+blended into the heading returned by `get_pose()` whenever the magnetometer
+is calibrated.
+
+#### `get_imu() → SensorImu | None`
+Cached `/sensor_imu` at 25 Hz (after `enable_imu()`).
+
+Key fields: `quat_w/x/y/z`, `earth_acc_x/y/z`, `raw_acc_x/y/z`,
+`raw_gyro_x/y/z`, `mag_x/y/z`, `mag_calibrated`, `timestamp`
+
+#### `get_fused_orientation() → float`
+Return the sensor-fused heading in degrees. Blends the absolute AHRS heading
+(corrects long-term drift) with wheel odometry (smooth, short-term accurate).
+Before `enable_imu()` or before magnetometer calibration, returns raw odometry
+theta. Same value as `get_pose()[2]`.
+
+#### `set_imu_z_down(z_down: bool) → None`
+Configure the IMU mounting orientation. Set `True` when the sensor is mounted
+upside-down (Z-axis toward the ground). Default: `False`.
+
+#### `set_orientation_fusion_alpha(alpha: float) → None`
+Set the AHRS heading weight for the complementary filter (0.0–1.0).
+Lower = more odometry (less noise, more drift). Higher = more AHRS (faster
+drift correction, more noise). Only valid when the active strategy is
+`OrientationComplementaryFilter` (the default). Default: `0.0`.
+
+#### `set_orientation_fusion_strategy(strategy: SensorFusion) → None`
+Replace the active heading-fusion strategy with any `SensorFusion` subclass.
+
+Aliases: `set_fusion_strategy()`, `set_fusion_alpha()`.
+
+---
+
+### Vision Detections
+
+Requires `enable_vision()` before first use.
+
+#### `enable_vision() → None`
+Subscribe to `/vision/detections` (published by the vision node).
+
+#### `get_detections(class_name: str | None = None) → list[dict]`
+Return the latest cached vision detections. Each dict has keys:
+`class_name`, `confidence`, `bbox` (`x`, `y`, `width`, `height`),
+`attributes` (dict of `{name: {value, score}}`).
+
+Pass `class_name` to filter by object class.
+
+#### `has_detection(class_name: str, min_confidence: float = 0.0) → bool`
+Return `True` if the latest snapshot contains a detection of the given class
+meeting the minimum confidence threshold.
+
+#### `get_detection_attribute(class_name, attribute_name, default=None, min_confidence=0.0) → str | None`
+Return the attribute value from the highest-confidence detection of
+`class_name`, or `default` if not found.
+
+#### `get_detection_image_size() → tuple[int, int]`
+Return the latest vision frame size as `(width, height)`.
+
+#### `is_vision_active(timeout_s: float = 1.0) → bool`
+Return `True` if a detection message arrived within `timeout_s` seconds.
 
 ---
 
@@ -562,16 +826,6 @@ Cached `/io_output_state` at 10 Hz. Fields: `led_brightness[5]`,
 
 ---
 
-### IMU
-
-#### `get_imu() → SensorImu | None`
-Cached `/sensor_imu` at 25 Hz.
-
-Key fields: `quat_w/x/y/z`, `earth_acc_x/y/z`, `raw_acc_x/y/z`,
-`raw_gyro_x/y/z`, `mag_x/y/z`, `mag_calibrated`, `timestamp`
-
----
-
 ### Units
 
 #### `set_unit(unit: Unit) → None`
@@ -621,8 +875,9 @@ Update this document when any of the following change:
 
 | Change | What to update |
 |--------|---------------|
-| New method added to `robot.py` | Add an entry to the relevant section above; add to README.md table if it's a core method |
+| New method added to robot.py | Add an entry to the relevant section above; add to README.md table if it's a core method |
 | Method signature changed | Update the signature and parameter notes in the section above |
+| New opt-in sensor added | Add a row to the opt-in sensor topics table; add a section under the relevant sensor heading |
 | ROS topic name changed | Update the topic name in the table next to the affected getter/publisher |
 | Firmware state machine behavior changed | Update the state machine section |
 | Telemetry rate changed | Update the rate in the Cached Getter Model table |

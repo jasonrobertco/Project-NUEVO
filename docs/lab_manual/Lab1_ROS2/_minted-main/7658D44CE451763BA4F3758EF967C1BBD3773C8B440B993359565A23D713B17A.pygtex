@@ -1,0 +1,3 @@
+\begin{Verbatim}[commandchars=\\\{\}]
+sudo\PYG{+w}{ }shutdown\PYG{+w}{ }\PYGZhy{}h\PYG{+w}{ }now
+\end{Verbatim}

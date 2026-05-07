@@ -11,6 +11,8 @@
 
   <depend>rclpy</depend>
   <depend>bridge_interfaces</depend>
+  <exec_depend>rplidar_ros</exec_depend>
+  <exec_depend>sensors</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

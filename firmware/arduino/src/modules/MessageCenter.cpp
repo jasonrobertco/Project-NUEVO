@@ -113,7 +113,7 @@ uint32_t MessageCenter::txDroppedFrames_ = 0;
 uint32_t MessageCenter::lastHeartbeatMs_ = 0;
 uint32_t MessageCenter::lastCmdMs_ = 0;
 uint32_t MessageCenter::lastRxByteMs_ = 0;
-bool MessageCenter::heartbeatValid_ = true;   // true → 2s grace period on boot before timeout fires
+bool MessageCenter::heartbeatValid_ = false;
 uint16_t MessageCenter::heartbeatTimeoutMs_ = HEARTBEAT_TIMEOUT_MS;
 
 uint8_t MessageCenter::motorDirMask_ = 0;
@@ -234,10 +234,7 @@ void MessageCenter::init()
     lastHeartbeatMs_ = now;
     lastCmdMs_ = now;
     lastRxByteMs_ = now;
-    // Start valid so SafetyManager doesn't fire during the boot grace period.
-    // checkHeartbeatTimeout() will clear this after HEARTBEAT_TIMEOUT_MS if no
-    // TLV arrives. routeMessage() re-sets it on every received packet.
-    heartbeatValid_ = true;
+    heartbeatValid_ = false;
     pendingMagCal_ = false;
     pendingServoStatus_ = false;
     pendingDCStatus_ = false;
@@ -670,6 +667,12 @@ void MessageCenter::sendTelemetry()
     }
     if (encodeDesc_.frameHeader.numTlvs > 0U) {
         sendFrame();
+        return;
+    }
+
+    // Gate all proactive telemetry on heartbeat — don't stream when Pi is absent.
+    if (!isHeartbeatValid()) {
+        telemetrySlot_ = (uint8_t)((slot + 1U) % 10U);
         return;
     }
 
@@ -1315,6 +1318,7 @@ void MessageCenter::handleDCSetPosition(const PayloadDCSetPosition *payload)
     if (motor.getMode() != DC_MODE_POSITION)
         motor.enable(DC_MODE_POSITION);
 
+    motor.setPositionVelocityLimit(payload->maxVelTicks);
     motor.setTargetPosition(payload->targetTicks);
 }
 
@@ -2105,6 +2109,12 @@ void MessageCenter::cancelDeferredActions()
 {
     deferredMagCalAction_ = DEFER_MAG_NONE;
     pendingMagCal_ = false;
+}
+
+void MessageCenter::scheduleSysInfoBroadcast()
+{
+    pendingSysInfoRsp_ = true;
+    pendingSysConfigRsp_ = true;
 }
 
 void MessageCenter::latchFaultFlags(uint8_t flags)

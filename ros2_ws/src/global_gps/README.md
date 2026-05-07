@@ -179,8 +179,8 @@ No special environment variables are needed.  The node connects to the
 Jetson's TCP server directly, which works through the lab WiFi NAT.
 
 Once running, the topic `/tag_detections` becomes available locally and other
-nodes (robot node, etc.) can subscribe to it with `ROS_LOCALHOST_ONLY=1` as
-normal.
+nodes (robot node, etc.) can subscribe to it with the RPi Docker default
+`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`.
 
 ### Subscribe in the robot node
 
@@ -215,11 +215,12 @@ def _on_gps_update(self, msg: TagDetectionArray) -> None:
   `docker compose down` and `up -d` with the camera already plugged in.
 
 **Robot cannot see `/tag_detections`**
-- Confirm `robot_gps` is running with `ROS_LOCALHOST_ONLY=0`.
-- Confirm the Jetson and the RPi are on the same network subnet.
-- Confirm `ROS_DOMAIN_ID` is the same on Jetson and RPi (default: 0).
-- From the RPi (with `ROS_LOCALHOST_ONLY=0`): `ros2 topic list` should show
-  `/global_gps/tag_detections`.
+- Confirm `robot_gps` is running in the RPi container.
+- Confirm the Jetson and the RPi are on the same network.
+- Confirm the Jetson TCP server is reachable from the RPi:
+  `nc -v 192.168.8.120 7777`
+- From the RPi container: `ros2 topic echo /tag_detections` should show data
+  when rover markers are visible.
 
 **Multiple `/bridge` nodes visible**
-- See `ros2_ws/TROUBLE_SHOOT.md`.
+- See [`docs/ros2/troubleshooting.md`](../../../docs/ros2/troubleshooting.md).

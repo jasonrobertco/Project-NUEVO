@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+env_file="${PI_CAMERA_ENV_FILE:-/etc/default/pi-camera}"
+if [[ -r "$env_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$env_file"
+fi
+
+: "${PI_CAMERA_DEVICE:=/dev/video10}"
+: "${PI_CAMERA_VIDEO_NR:=10}"
+: "${PI_CAMERA_CARD_LABEL:=Pi Camera}"
+: "${PI_CAMERA_WIDTH:=640}"
+: "${PI_CAMERA_HEIGHT:=480}"
+: "${PI_CAMERA_FPS:=15}"
+: "${PI_CAMERA_PIXEL_FORMAT:=YUYV}"
+: "${PI_CAMERA_PRODUCER:=rpicam_ffmpeg_yuyv}"
+
+log() {
+    printf '[pi-camera] %s\n' "$*"
+}
+
+die() {
+    printf '[pi-camera] ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "$1 is not installed"
+}
+
+require_cmd rpicam-vid
+require_cmd ffmpeg
+
+if [[ ! -c "$PI_CAMERA_DEVICE" ]]; then
+    log "$PI_CAMERA_DEVICE is missing; trying to load v4l2loopback"
+    modprobe v4l2loopback \
+        video_nr="$PI_CAMERA_VIDEO_NR" \
+        card_label="$PI_CAMERA_CARD_LABEL" \
+        exclusive_caps=1 \
+        max_buffers=4 || true
+fi
+
+for _ in {1..20}; do
+    [[ -c "$PI_CAMERA_DEVICE" ]] && break
+    sleep 0.25
+done
+
+[[ -c "$PI_CAMERA_DEVICE" ]] || die "$PI_CAMERA_DEVICE is not available"
+
+case "$PI_CAMERA_PRODUCER" in
+    rpicam_ffmpeg_yuyv)
+        log "feeding $PI_CAMERA_DEVICE at ${PI_CAMERA_WIDTH}x${PI_CAMERA_HEIGHT}@${PI_CAMERA_FPS} as $PI_CAMERA_PIXEL_FORMAT"
+        rpicam-vid \
+            --nopreview \
+            --width "$PI_CAMERA_WIDTH" \
+            --height "$PI_CAMERA_HEIGHT" \
+            --framerate "$PI_CAMERA_FPS" \
+            --codec mjpeg \
+            --timeout 0 \
+            --output - |
+        ffmpeg \
+            -nostdin \
+            -loglevel warning \
+            -re \
+            -f mjpeg \
+            -i pipe:0 \
+            -vf "scale=${PI_CAMERA_WIDTH}:${PI_CAMERA_HEIGHT},format=yuyv422" \
+            -vcodec rawvideo \
+            -pix_fmt yuyv422 \
+            -f v4l2 \
+            "$PI_CAMERA_DEVICE"
+        ;;
+    *)
+        die "unsupported PI_CAMERA_PRODUCER=$PI_CAMERA_PRODUCER"
+        ;;
+esac

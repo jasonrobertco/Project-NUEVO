@@ -1,0 +1,9 @@
+string class_name
+float32 confidence
+uint32 x
+uint32 y
+uint32 width
+uint32 height
+string[] attribute_names
+string[] attribute_values
+float32[] attribute_scores
