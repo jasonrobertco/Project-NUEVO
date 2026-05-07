@@ -8,7 +8,7 @@ def generate_launch_description():
 
     Starts three nodes:
       bridge      — FastAPI/UART bridge to the Arduino
-      rplidar_node — RPLidar scanner (serial port /dev/rplidar, 460800 baud)
+      rplidar_node — RPLidar C1 scanner (serial port /dev/rplidar, 460800 baud)
       robot       — runs examples/lidar_obstacle_test.py via main.py
 
     Before launching, copy the test script over main.py:
@@ -32,7 +32,7 @@ def generate_launch_description():
         ),
         Node(
             package="rplidar_ros",
-            executable="rplidar_node",
+            executable="rplidar_c1_node",
             name="rplidar_node",
             output="screen",
             parameters=[{

@@ -143,6 +143,7 @@ DCMotor::DCMotor()
     , maPerVolt_(1000.0f)
     , encoder_(nullptr)
     , targetVelocityQ16_(0)
+    , positionVelLimitQ16_(VEL_LIMIT_Q16)
     , feedbackVelocityQ16_(0)
     , latchedPosition_(0)
     , positionLatched_(false)
@@ -194,6 +195,9 @@ void DCMotor::setPins(uint8_t pinEN, uint8_t pinIN1, uint8_t pinIN2) {
     pinMode(pinIN1_, OUTPUT);
     pinMode(pinIN2_, OUTPUT);
 
+    // Keep the bridge fully de-energized during bring-up without letting
+    // Arduino's analogWrite() reconfigure the PWM timers we manage explicitly.
+    digitalWrite(pinEN_, LOW);
     digitalWrite(pinIN1_, LOW);
     digitalWrite(pinIN2_, LOW);
 
@@ -201,10 +205,6 @@ void DCMotor::setPins(uint8_t pinEN, uint8_t pinIN1, uint8_t pinIN2) {
     in2OutReg_ = portOutputRegister(digitalPinToPort(pinIN2_));
     in1Mask_ = digitalPinToBitMask(pinIN1_);
     in2Mask_ = digitalPinToBitMask(pinIN2_);
-
-    if (pinEN_ == PIN_M3_EN || pinEN_ == PIN_M4_EN) {
-        analogWrite(pinEN_, 0);
-    }
 }
 
 void DCMotor::setLimitPin(uint8_t pinLimit, uint8_t activeState) {
@@ -306,6 +306,15 @@ void DCMotor::setTargetVelocity(float velocity) {
     targetVelocity_ = velocity;
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         targetVelocityQ16_ = floatToQ16(velocity);
+    }
+}
+
+void DCMotor::setPositionVelocityLimit(int32_t maxVelocityTicksPerSec) {
+    if (maxVelocityTicksPerSec < 1) {
+        maxVelocityTicksPerSec = 1;
+    }
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        positionVelLimitQ16_ = floatToQ16((float)maxVelocityTicksPerSec);
     }
 }
 
@@ -450,6 +459,7 @@ void DCMotor::service() {
     int16_t directPwm;
     int32_t targetPosition;
     int32_t targetVelocityQ16;
+    int32_t positionVelLimitQ16;
     int32_t feedbackVelocityQ16;
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
@@ -457,6 +467,7 @@ void DCMotor::service() {
         directPwm = directPwm_;
         targetPosition = targetPosition_;
         targetVelocityQ16 = targetVelocityQ16_;
+        positionVelLimitQ16 = positionVelLimitQ16_;
         feedbackVelocityQ16 = feedbackVelocityQ16_;
     }
 
@@ -501,7 +512,9 @@ void DCMotor::service() {
             int32_t posErrQ16 = (targetPosition - currentPosition) << 16;
             velocitySetpointQ16 = pidStepQ16(posIAccQ16_, posPrevErrQ16_,
                                              posKpQ16_, posKiDtQ16_, posKdDivDtQ16_,
-                                             posErrQ16, -VEL_LIMIT_Q16, VEL_LIMIT_Q16);
+                                             posErrQ16,
+                                             -positionVelLimitQ16,
+                                             positionVelLimitQ16);
         }
 
         int32_t velErrQ16 = velocitySetpointQ16 - feedbackVelocityQ16;

@@ -134,7 +134,7 @@ class PositionFusionRuntimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         _install_fake_robot_dependencies()
-        cls.mod = importlib.import_module("robot.test_position_fusion")
+        cls.mod = importlib.import_module("robot.examples.position_fusion_demo")
 
     def test_drive_straight_learns_gps_offset_on_first_acquisition(self) -> None:
         # Two initial reset-propagation waits, then:

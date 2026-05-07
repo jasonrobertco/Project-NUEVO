@@ -3,21 +3,21 @@
 Inside your project root directory (Project-NUEVO)
 ```git pull```
 
-2. Connect your lidar and Check if the lidar device is present
-```sudo chmod 777 /dev/ttyUSB0```
-
-3. Stop any running Docker containers
+2. Stop any running Docker containers
 ```docker compose -f $COMPOSE down```
 
-4. Rebuild the container (one-time)
+3. Rebuild the container (one-time)
 ```docker compose -f $COMPOSE build```
 
-5. Restart Docker and enter docker terminal
+4. Restart Docker and enter docker terminal
 ```bash
 docker compose -f $COMPOSE up -d
 docker compose -f $COMPOSE logs -f ros2_runtime
 docker compose -f $COMPOSE exec ros2_runtime bash
 ```
+
+5. Check if the lidar device is present
+```sudo chmod 777 /dev/ttyUSB0```
 
 # Inside Docker
 1. Source ROS2 environment

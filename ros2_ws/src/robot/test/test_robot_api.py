@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import importlib
 import math
+import numpy as np
 import sys
 import threading
+import time
 import types
 import unittest
 from unittest import mock
 from pathlib import Path
+import numpy as np
 
 
 class FakePublisher:
@@ -20,10 +23,13 @@ class FakePublisher:
 
 
 class FakeLogger:
-    def info(self, _msg: str) -> None:
+    def info(self, _msg: str, *args, **kwargs) -> None:
         pass
 
-    def error(self, _msg: str) -> None:
+    def error(self, _msg: str, *args, **kwargs) -> None:
+        pass
+
+    def warning(self, _msg: str, *args, **kwargs) -> None:
         pass
 
 
@@ -69,6 +75,13 @@ class FakeNode:
     def get_logger(self) -> FakeLogger:
         return self.logger
 
+    def get_clock(self):
+        return types.SimpleNamespace(
+            now=lambda: types.SimpleNamespace(
+                to_msg=lambda: types.SimpleNamespace()
+            )
+        )
+
 
 def _install_fake_robot_dependencies() -> None:
     rclpy = types.ModuleType("rclpy")
@@ -78,12 +91,26 @@ def _install_fake_robot_dependencies() -> None:
     sys.modules["rclpy"] = rclpy
     sys.modules["rclpy.node"] = rclpy_node
 
+    sensor_msgs = types.ModuleType("sensor_msgs")
+    sensor_msgs_msg = types.ModuleType("sensor_msgs.msg")
+    sensor_msgs_msg.LaserScan = type("LaserScan", (), {})
+    sensor_msgs.msg = sensor_msgs_msg
+    sys.modules["sensor_msgs"] = sensor_msgs
+    sys.modules["sensor_msgs.msg"] = sensor_msgs_msg
+
     bridge_interfaces = types.ModuleType("bridge_interfaces")
     bridge_interfaces_msg = types.ModuleType("bridge_interfaces.msg")
     bridge_interfaces_srv = types.ModuleType("bridge_interfaces.srv")
 
     def make_message(name: str):
-        return type(name, (), {})
+        class _Message:
+            def __init__(self) -> None:
+                self.header = types.SimpleNamespace(stamp=None)
+                if name == "TrackedObstacleArray":
+                    self.obstacles = []
+
+        _Message.__name__ = name
+        return _Message
 
     for name in [
         "DCEnable",
@@ -102,6 +129,11 @@ def _install_fake_robot_dependencies() -> None:
         "IOSetNeopixel",
         "SensorImu",
         "SensorKinematics",
+        "FusedPose",
+        "LidarWorldPoints",
+        "TrackedObstacle",
+        "TrackedObstacleArray",
+        "VirtualTarget",
         "ServoEnable",
         "ServoSet",
         "ServoStateAll",
@@ -122,6 +154,7 @@ def _install_fake_robot_dependencies() -> None:
         "SystemPower",
         "SystemState",
         "TagDetectionArray",
+        "VisionDetectionArray",
     ]:
         setattr(bridge_interfaces_msg, name, make_message(name))
 
@@ -194,6 +227,7 @@ class RobotApiTests(unittest.TestCase):
         self.robot.set_odometry_parameters(
             left_motor_dir_inverted=False,
             right_motor_dir_inverted=False,
+            timeout=0,
         )
         self.node.publishers["/dc_set_velocity"].published.clear()
         self.robot.set_velocity(100.0, 0.0)
@@ -204,6 +238,7 @@ class RobotApiTests(unittest.TestCase):
         self.robot.set_odometry_parameters(
             left_motor_dir_inverted=True,
             right_motor_dir_inverted=False,
+            timeout=0,
         )
         self.node.publishers["/dc_set_velocity"].published.clear()
         self.robot.set_velocity(100.0, 0.0)
@@ -229,6 +264,7 @@ class RobotApiTests(unittest.TestCase):
         self.robot.set_odometry_parameters(
             wheel_diameter=3.0,
             wheel_base=12.0,
+            timeout=0,
         )
 
         msg = self.node.publishers["/sys_odom_param_set"].published[-1]
@@ -282,9 +318,134 @@ class RobotApiTests(unittest.TestCase):
             },
         )
 
+    def test_odom_param_stale_firmware_echo_reasserts_user_config(self) -> None:
+        self.robot.set_odometry_parameters(left_motor_id=3, right_motor_id=4, timeout=0)
+        self.node.publishers["/sys_odom_param_set"].published.clear()
+
+        firmware_echo = types.SimpleNamespace(
+            wheel_diameter_mm=70.0,
+            wheel_base_mm=300.0,
+            initial_theta_deg=90.0,
+            left_motor_number=1,
+            left_motor_dir_inverted=False,
+            right_motor_number=2,
+            right_motor_dir_inverted=True,
+        )
+        self.robot._on_odom_param_rsp(firmware_echo)
+
+        params = self.robot.get_odometry_parameters()
+        self.assertEqual(params["left_motor_number"], 3)
+        self.assertEqual(params["right_motor_number"], 4)
+
+        reassert = self.node.publishers["/sys_odom_param_set"].published
+        self.assertEqual(len(reassert), 1)
+        self.assertEqual(reassert[0].left_motor_number, 3)
+        self.assertEqual(reassert[0].right_motor_number, 4)
+
+    def test_odom_param_matching_firmware_echo_is_silent(self) -> None:
+        self.robot.set_odometry_parameters(left_motor_id=3, right_motor_id=4, timeout=0)
+        self.node.publishers["/sys_odom_param_set"].published.clear()
+
+        params = self.robot.get_odometry_parameters()
+        matching_echo = types.SimpleNamespace(
+            wheel_diameter_mm=params["wheel_diameter_mm"],
+            wheel_base_mm=params["wheel_base_mm"],
+            initial_theta_deg=params["initial_theta_deg"],
+            left_motor_number=3,
+            left_motor_dir_inverted=params["left_motor_dir_inverted"],
+            right_motor_number=4,
+            right_motor_dir_inverted=params["right_motor_dir_inverted"],
+        )
+        self.robot._on_odom_param_rsp(matching_echo)
+
+        self.assertEqual(self.node.publishers["/sys_odom_param_set"].published, [])
+
+    def test_set_odometry_parameters_blocking_confirmed(self) -> None:
+        result_holder = []
+
+        def _call_set() -> None:
+            result_holder.append(
+                self.robot.set_odometry_parameters(
+                    left_motor_id=3,
+                    right_motor_id=4,
+                    timeout=2.0,
+                )
+            )
+
+        thread = threading.Thread(target=_call_set)
+        thread.start()
+        thread.join(timeout=0.1)
+        self.assertTrue(thread.is_alive(), "set_odometry_parameters returned before firmware echo")
+
+        params = self.robot.get_odometry_parameters()
+        self.robot._on_odom_param_rsp(types.SimpleNamespace(
+            wheel_diameter_mm=params["wheel_diameter_mm"],
+            wheel_base_mm=params["wheel_base_mm"],
+            initial_theta_deg=params["initial_theta_deg"],
+            left_motor_number=3,
+            left_motor_dir_inverted=params["left_motor_dir_inverted"],
+            right_motor_number=4,
+            right_motor_dir_inverted=params["right_motor_dir_inverted"],
+        ))
+
+        thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive(), "set_odometry_parameters did not unblock after echo")
+        self.assertEqual(result_holder, [True])
+
+    def test_set_odometry_parameters_blocking_timeout(self) -> None:
+        result = self.robot.set_odometry_parameters(
+            left_motor_id=3,
+            right_motor_id=4,
+            timeout=0.05,
+        )
+        self.assertFalse(result)
+
+    def test_set_odometry_parameters_retries_until_matching_echo(self) -> None:
+        result_holder = []
+
+        def _call_set() -> None:
+            result_holder.append(
+                self.robot.set_odometry_parameters(
+                    left_motor_id=3,
+                    right_motor_id=4,
+                    timeout=0.3,
+                )
+            )
+
+        thread = threading.Thread(target=_call_set)
+        thread.start()
+        time.sleep(0.02)
+
+        self.robot._on_odom_param_rsp(types.SimpleNamespace(
+            wheel_diameter_mm=70.0,
+            wheel_base_mm=300.0,
+            initial_theta_deg=90.0,
+            left_motor_number=1,
+            left_motor_dir_inverted=False,
+            right_motor_number=2,
+            right_motor_dir_inverted=True,
+        ))
+
+        time.sleep(0.12)
+        params = self.robot.get_odometry_parameters()
+        self.robot._on_odom_param_rsp(types.SimpleNamespace(
+            wheel_diameter_mm=params["wheel_diameter_mm"],
+            wheel_base_mm=params["wheel_base_mm"],
+            initial_theta_deg=params["initial_theta_deg"],
+            left_motor_number=3,
+            left_motor_dir_inverted=params["left_motor_dir_inverted"],
+            right_motor_number=4,
+            right_motor_dir_inverted=params["right_motor_dir_inverted"],
+        ))
+
+        thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive(), "set_odometry_parameters did not unblock after retry")
+        self.assertEqual(result_holder, [True])
+        self.assertGreaterEqual(len(self.node.publishers["/sys_odom_param_req"].published), 2)
+
     def test_duplicate_odom_motor_pair_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be different"):
-            self.robot.set_odometry_parameters(left_motor_id=2, right_motor_id=2)
+            self.robot.set_odometry_parameters(left_motor_id=2, right_motor_id=2, timeout=0)
 
     def test_request_pid_and_get_pid_cache(self) -> None:
         self.robot.request_pid(2, self.hardware_map.DCPidLoop.VELOCITY)
@@ -349,6 +510,37 @@ class RobotApiTests(unittest.TestCase):
 
         self.assertIsInstance(handle, self.robot_module.MotionHandle)
         self.assertTrue(handle.is_finished())
+        self.assertFalse(self.robot.is_moving())
+
+    def test_finished_handle_releases_motion_slot_for_next_command(self) -> None:
+        handle = self.robot._start_nav(lambda: None, blocking=False, timeout=0.1)
+
+        self.assertTrue(handle.wait(timeout=0.1))
+        self.assertTrue(handle.is_finished())
+        self.assertFalse(self.robot.is_moving())
+
+        next_handle = self.robot._start_nav(lambda: None, blocking=False, timeout=0.1)
+        self.assertIsInstance(next_handle, self.robot_module.MotionHandle)
+
+    def test_nav_drive_straight_reverse_uses_same_heading_correction_sign(self) -> None:
+        self.robot._nav_cancel.clear()
+        poses = iter([
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, math.radians(10.0)),
+        ])
+        commands: list[tuple[float, float]] = []
+
+        self.robot._get_pose_mm = lambda: next(poses)
+        self.robot._send_body_velocity_mm = lambda linear, angular: commands.append((linear, angular))
+        self.robot._sleep_with_cancel = lambda _seconds: False
+        self.robot.stop = lambda: None
+
+        self.robot._nav_drive_straight(-500.0, 200.0, 20.0)
+
+        self.assertEqual(len(commands), 1)
+        linear, angular = commands[0]
+        self.assertLess(linear, 0.0)
+        self.assertLess(angular, 0.0)
 
     def test_purepursuit_follow_path_requires_waypoints(self) -> None:
         with self.assertRaisesRegex(ValueError, "must not be empty"):
@@ -447,7 +639,171 @@ class RobotApiTests(unittest.TestCase):
             150.0,
             1.0,
             500.0,
+            400.0,
+            100.0,
+            200.0,
         )
+
+    def test_nav_follow_apf_path_uses_single_goal_planner(self) -> None:
+        planner_instance = mock.Mock()
+        planner_instance.navigate_to_goal.return_value = (42.0, -0.5)
+        sent_commands: list[tuple[float, float]] = []
+
+        self.robot._get_pose_mm = lambda: (10.0, 20.0, math.pi / 2.0)
+        self.robot.get_obstacle_tracks = lambda include_unconfirmed=False: [
+            {"id": 7, "x": 10.0, "y": 120.0, "radius": 75.0, "hits": 3}
+        ]
+        self.robot._send_body_velocity_mm = lambda linear, angular: sent_commands.append((linear, angular))
+        self.robot._sleep_with_cancel = lambda _seconds: False
+        self.robot.stop = lambda: None
+        self.robot._nav_cancel.clear()
+
+        with mock.patch("robot.path_planner.APFPlanner", return_value=planner_instance) as planner_cls:
+            self.robot._nav_follow_apf_path(
+                [(500.0, 0.0), (1000.0, 0.0)],
+                100.0,
+                250.0,
+                50.0,
+                20.0,
+                150.0,
+                1.2,
+                800.0,
+            )
+
+        planner_cls.assert_called_once_with(
+            max_linear=100.0,
+            max_angular=1.2,
+            repulsion_gain=800.0,
+            repulsion_range=150.0,
+            goal_tolerance=20.0,
+        )
+        planner_instance.navigate_to_goal.assert_called_once()
+        args, _kwargs = planner_instance.navigate_to_goal.call_args
+        self.assertEqual(args[0], (10.0, 20.0, math.pi / 2.0))
+        self.assertEqual(args[1], (500.0, 0.0))
+        np.testing.assert_allclose(args[2], np.array([[10.0, 120.0, 75.0]]))
+        self.assertEqual(sent_commands, [(42.0, -0.5)])
+
+    def test_lapf_to_goal_starts_navigation_with_scaled_parameters(self) -> None:
+        with mock.patch.object(
+            self.robot,
+            "_start_nav",
+            side_effect=lambda target, blocking, timeout: (target(), "handle")[1],
+        ), mock.patch.object(self.robot, "_nav_lapf_to_goal") as nav_lapf:
+            result = self.robot.lapf_to_goal(
+                100.0,
+                200.0,
+                velocity=120.0,
+                tolerance=25.0,
+                leash_length_mm=300.0,
+                repulsion_range_mm=500.0,
+                target_speed_mm_s=220.0,
+                blocking=False,
+                repulsion_gain=900.0,
+                attraction_gain=1.5,
+                force_ema_alpha=0.4,
+                inflation_margin_mm=200.0,
+                leash_half_angle_deg=60.0,
+            )
+
+        self.assertEqual(result, "handle")
+        nav_lapf.assert_called_once_with(
+            (100.0, 200.0),
+            120.0,
+            25.0,
+            300.0,
+            500.0,
+            220.0,
+            1.0,
+            900.0,
+            1.5,
+            0.4,
+            200.0,
+            60.0,
+        )
+
+    def test_lapf_to_goal_keeps_mm_defaults_unscaled_when_unit_is_inch(self) -> None:
+        self.robot.set_unit(self.robot_module.Unit.INCH)
+
+        with mock.patch.object(
+            self.robot,
+            "_start_nav",
+            side_effect=lambda target, blocking, timeout: (target(), "handle")[1],
+        ), mock.patch.object(self.robot, "_nav_lapf_to_goal") as nav_lapf:
+            result = self.robot.lapf_to_goal(
+                10.0,
+                20.0,
+                velocity=3.0,
+                tolerance=1.0,
+                blocking=False,
+            )
+
+        unit_scale = self.robot_module.Unit.INCH.value
+        self.assertEqual(result, "handle")
+        nav_lapf.assert_called_once_with(
+            (10.0 * unit_scale, 20.0 * unit_scale),
+            3.0 * unit_scale,
+            1.0 * unit_scale,
+            self.robot.LAPF_LEASH_LENGTH_MM,
+            self.robot.LAPF_REPULSION_RANGE_MM,
+            self.robot.LAPF_TARGET_SPEED_MM_S,
+            1.0,
+            self.robot.LAPF_REPULSION_GAIN,
+            self.robot.LAPF_ATTRACTION_GAIN,
+            self.robot.LAPF_FORCE_EMA_ALPHA,
+            self.robot.LAPF_INFLATION_MARGIN_MM,
+            self.robot.LAPF_LEASH_HALF_ANGLE_DEG,
+        )
+
+    def test_publish_virtual_target_emits_active_and_clear_messages(self) -> None:
+        publisher = FakePublisher("/virtual_target")
+        self.robot._pub_virtual_target = publisher
+
+        self.robot._set_virtual_target_world_mm((320.0, 180.0))
+        self.robot._set_virtual_target_world_mm(None)
+
+        self.assertEqual(len(publisher.published), 2)
+        active_msg = publisher.published[0]
+        clear_msg = publisher.published[1]
+        self.assertTrue(active_msg.active)
+        self.assertEqual(active_msg.x, 320.0)
+        self.assertEqual(active_msg.y, 180.0)
+        self.assertFalse(clear_msg.active)
+
+    def test_publish_lidar_world_projects_robot_frame_obstacles(self) -> None:
+        publisher = FakePublisher("/lidar_world_points")
+        self.robot._lidar_world_pub = publisher
+        self.robot._obstacles_mm = np.array([[100.0, 0.0], [0.0, 100.0]], dtype=float)
+        self.robot._fused_x_mm = 10.0
+        self.robot._fused_y_mm = 20.0
+        self.robot._fused_theta = math.pi / 2.0
+
+        self.robot._publish_lidar_world()
+
+        self.assertEqual(len(publisher.published), 1)
+        msg = publisher.published[0]
+        np.testing.assert_allclose(msg.xs, [10.0, -90.0])
+        np.testing.assert_allclose(msg.ys, [120.0, 20.0])
+        self.assertEqual(msg.robot_x, 10.0)
+        self.assertEqual(msg.robot_y, 20.0)
+        self.assertEqual(msg.robot_theta, math.pi / 2.0)
+
+    def test_publish_obstacle_tracks_emits_confirmed_tracks_only(self) -> None:
+        publisher = FakePublisher("/obstacle_tracks")
+        self.robot._pub_obstacle_tracks = publisher
+        self.robot.get_obstacle_tracks = lambda include_unconfirmed=False: [
+            {"id": 2, "x": 300.0, "y": 50.0, "radius": 75.0, "hits": 2}
+        ]
+
+        self.robot._publish_obstacle_tracks()
+
+        self.assertEqual(len(publisher.published), 1)
+        msg = publisher.published[0]
+        self.assertEqual(len(msg.obstacles), 1)
+        self.assertEqual(msg.obstacles[0].id, 2)
+        self.assertEqual(msg.obstacles[0].x, 300.0)
+        self.assertEqual(msg.obstacles[0].y, 50.0)
+        self.assertEqual(msg.obstacles[0].radius, 75.0)
 
     def test_unit_dependent_navigation_parameters_must_be_explicit(self) -> None:
         with self.assertRaises(TypeError):
@@ -526,14 +882,17 @@ class RobotApiTests(unittest.TestCase):
 
         self.robot.set_obstacles([(1.0, 2.0)])
 
-        self.assertEqual(self.robot._get_obstacles_mm(), [(25.4, 50.8)])
+        np.testing.assert_allclose(self.robot._get_obstacles_mm(), [(25.4, 50.8)])
         self.assertEqual(self.robot.get_obstacles(), [(1.0, 2.0)])
 
     def test_obstacle_provider_is_combined_with_cached_obstacles(self) -> None:
         self.robot.set_obstacles([(10.0, 20.0)])
         self.robot.set_obstacle_provider(lambda: [(30.0, -40.0)])
 
-        self.assertEqual(self.robot._get_obstacles_mm(), [(10.0, 20.0), (30.0, -40.0)])
+        np.testing.assert_allclose(
+            self.robot._get_obstacles_mm(),
+            [(10.0, 20.0), (30.0, -40.0)],
+        )
         self.assertEqual(self.robot.get_obstacles(), [(10.0, 20.0), (30.0, -40.0)])
 
     def test_path_progress_does_not_finish_early_on_closed_loop(self) -> None:

@@ -331,3 +331,57 @@ export type OdomParamData = SysOdomParamRspData
 export type IMUData = SensorIMUData
 export type KinematicsData = SensorKinematicsData
 export type MagCalStatusData = SensorMagCalStatusData
+
+// ============================================================================
+// RPi sensor relay topics (Phase 6+)
+// ============================================================================
+
+export interface FusedPoseData {
+  x: number          // world-frame mm
+  y: number          // world-frame mm
+  theta: number      // radians
+  gps_active: boolean
+}
+
+export interface GpsStatusData {
+  is_detected: boolean
+  tag_id: number
+  x: number   // world-frame mm
+  y: number   // world-frame mm
+}
+
+export interface TagDetectionEntry {
+  tag_id: number
+  x: number   // world-frame mm
+  y: number   // world-frame mm
+}
+
+export interface LidarPointsData {
+  xs: number[]        // world-frame mm, parallel with ys
+  ys: number[]
+  robot_x: number     // fused pose at time of scan (mm)
+  robot_y: number
+  robot_theta: number // radians
+}
+
+export interface ObstacleTrackData {
+  id: number
+  x: number
+  y: number
+  radius: number
+}
+
+export interface VirtualTargetData {
+  x: number
+  y: number
+}
+
+export interface RosNodeEntry {
+  name: string
+  publishers: string[]
+  subscribers: string[]
+}
+
+export interface RosNodesData {
+  nodes: RosNodeEntry[]
+}

@@ -1,0 +1,5 @@
+# Project NUEVO RPLidar C1 USB serial adapter.
+# Reload after installing:
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", GROUP="dialout", MODE="0660", SYMLINK+="rplidar"

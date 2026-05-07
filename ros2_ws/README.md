@@ -12,8 +12,8 @@ The current ROS2 design keeps the workspace small and beginner-friendly:
 
 If you are new to ROS2, read these files in order:
 
-1. [ROS2_NODES_DESIGN.md](ROS2_NODES_DESIGN.md)
-2. [BRIDGE_RUNTIME.md](BRIDGE_RUNTIME.md)
+1. [docs/ros2/ros2_nodes_design.md](../docs/ros2/ros2_nodes_design.md)
+2. [docs/ros2/bridge_runtime.md](../docs/ros2/bridge_runtime.md)
 3. this README
 
 
@@ -28,9 +28,13 @@ ros2_ws/
 │   ├── sensors/             # Pi-side sensor nodes outside the Arduino firmware
 │   └── vision/              # camera and perception nodes
 ├── docker/                  # Docker image, compose files, and entrypoint scripts
-├── ROS2_NODES_DESIGN.md
-├── BRIDGE_RUNTIME.md
-└── RPI_SETUP.md             # legacy note; the setup steps are also included below
+└── README.md
+```
+
+Workspace-level ROS2 docs now live in:
+
+```text
+docs/ros2/
 ```
 
 
@@ -133,7 +137,8 @@ COMPOSE=ros2_ws/docker/docker-compose.vm.yml
 ### 2. Raspberry Pi UART Setup
 
 If you are using a real Raspberry Pi 5 with the Arduino bridge, enable UART
-first.
+first. A shorter reference is also in
+[`docs/ros2/rpi_setup.md`](../docs/ros2/rpi_setup.md).
 
 ```bash
 sudo nano /boot/firmware/config.txt
@@ -172,21 +177,42 @@ The current bridge runtime expects:
 ```
 
 
-### 3. Build the Frontend Once
+### 3. Raspberry Pi Camera Setup
 
-The bridge serves the built web UI. Build the frontend before starting the ROS
-container:
+If the Pi CSI camera is used, install the native Ubuntu camera service before
+starting the ROS2 container:
+
+```bash
+./ros2_ws/host_camera/install.sh
+```
+
+The installer creates a host-managed v4l2loopback camera at:
+
+```text
+/dev/video10
+```
+
+The ROS2 container mounts that virtual camera as a regular V4L2 device. Students
+should not need to install or debug `libcamera` inside Docker.
+
+
+### 4. Build the Frontend Once
+
+On the Raspberry Pi, `sudo ./ros2_ws/setup_rpi.sh` now builds the frontend and
+copies it into `nuevo_ui/backend/static/` automatically.
+
+If you need to rebuild the UI manually after frontend changes, run:
 
 ```bash
 cd nuevo_ui/frontend
-npm install
+npm ci
 npm run build
 cd ../..
 cp -r nuevo_ui/frontend/dist/. nuevo_ui/backend/static/
 ```
 
 
-### 4. Start the Container
+### 5. Start the Container
 
 From the repository root:
 
@@ -200,7 +226,25 @@ Wait until the log shows that `colcon build` finished and the container is
 ready.
 
 
-### 5. Enter the Running Container
+### 6. Camera Sanity Check
+
+If the Pi CSI camera is used, run this from the Raspberry Pi host after the ROS2
+container is running:
+
+```bash
+./ros2_ws/host_camera/check.sh
+```
+
+The check captures one frame on the host and one frame from inside the Docker
+container:
+
+```text
+/tmp/nuevo_camera_check/host_loopback.jpg
+/tmp/nuevo_camera_check/docker_loopback.jpg
+```
+
+
+### 7. Enter the Running Container
 
 Use the helper script:
 
@@ -230,7 +274,7 @@ cd /ros2_ws
 ```
 
 
-### 6. Sanity Check the Workspace
+### 8. Sanity Check the Workspace
 
 Inside the container:
 
@@ -247,7 +291,7 @@ Expected result:
 - the message and service definitions print correctly
 
 
-### 7. Start the Bridge Node First
+### 9. Start the Bridge Node First
 
 In the first container shell:
 
@@ -278,7 +322,7 @@ curl http://localhost:8000/health
 ```
 
 
-### 8. Start Other Nodes One by One
+### 10. Start Other Nodes One by One
 
 Example robot node:
 
@@ -288,8 +332,8 @@ ros2 run robot robot
 ```
 
 The `robot` node is the main student application layer. Students only edit
-`src/robot/robot/main.py`. See [ROBOT_NODE_DESIGN.md](src/robot/ROBOT_NODE_DESIGN.md)
-for the API reference.
+`src/robot/robot/main.py`. See
+[`src/robot/README.md`](src/robot/README.md) for the API reference.
 
 The `sensors` and `vision` packages can be started the same way when needed.
 

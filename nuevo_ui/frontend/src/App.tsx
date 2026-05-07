@@ -9,6 +9,9 @@ import { ArduinoSystemSection } from './components/ArduinoSystemSection';
 import { UserIOSection } from './components/UserIOSection';
 import { DCMotorSection } from './components/DCMotorSection';
 import { SensorSection } from './components/SensorSection';
+import { WorldCanvas } from './components/WorldCanvas';
+import { GpsStatusCard } from './components/GpsStatusCard';
+import { RosNodesCard } from './components/RosNodesCard';
 import { LoginPage } from './components/LoginPage';
 import { UserManagementModal } from './components/UserManagementModal';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -205,7 +208,9 @@ function Dashboard() {
             <div className="grid grid-cols-1 md:grid-cols-8 gap-4">
               <div className="md:col-span-2 space-y-3">
                 <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">RPi Sensors</h3>
-                <SensorSection source="rpi" />
+                <WorldCanvas />
+                <GpsStatusCard />
+                <RosNodesCard />
               </div>
               <div className="md:col-span-2 space-y-3">
                 <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Arduino Sensors</h3>
@@ -217,7 +222,7 @@ function Dashboard() {
 
         {/* Footer */}
         <footer className="mt-8 pb-24 text-center text-white/30 text-xs space-y-1">
-          <p>NUEVO UI · MAE 162 · UCLA · 2026</p>
+          <p>NUEVO UI 0.5.5· MAE 162 · UCLA · 2026</p>
         </footer>
       </div>
 

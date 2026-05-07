@@ -8,13 +8,19 @@ import type {
   DCMotorItem,
   DCPidRspData,
   DCStateAllData,
+  FusedPoseData,
+  GpsStatusData,
+  TagDetectionEntry,
   IMUData,
   IOInputStateData,
   IOOutputStateData,
   IOStatusData,
   KinematicsData,
+  LidarPointsData,
   MagCalStatusData,
+  ObstacleTrackData,
   OdomParamData,
+  RosNodeEntry,
   SensorRangeData,
   SensorUltrasonicAllData,
   ServoStatusAllData,
@@ -28,6 +34,7 @@ import type {
   SysPowerData,
   SysStateData,
   SystemStatusData,
+  VirtualTargetData,
   VoltageData,
 } from '../lib/wsProtocol'
 
@@ -244,8 +251,24 @@ function clearedRobotState(connection: ConnectionData | null, serialConnected: b
     ioOutputRaw: null,
     dcPidCache: {},
     stepConfigCache: {},
+    fusedPose: null,
+    fusedPoseTrail: [],
+    odometryTrail: [],
+    gpsStatus: null,
+    tagDetections: [],
+    lidarPoints: [],
+    obstacleTracks: [],
+    virtualTarget: null,
+    rosNodes: [],
   }
 }
+
+// Trail history cap — keeps memory bounded without losing the full session path.
+const MAX_TRAIL_PTS = 5000
+
+// Lidar rolling window — how many consecutive frames to overlay on the canvas.
+// Increase to fill in gaps when the scanner misses angles; decrease for less lag.
+export const LIDAR_WINDOW_FRAMES = 3
 
 interface RobotState {
   connected: boolean
@@ -274,6 +297,16 @@ interface RobotState {
   ioOutputRaw: IOOutputStateData | null
   dcPidCache: Record<string, DCPidRspData>
   stepConfigCache: Record<number, StepConfigRspData>
+  // RPi sensor relay state
+  fusedPose: FusedPoseData | null
+  fusedPoseTrail: Array<[number, number]>   // [x_mm, y_mm] history
+  odometryTrail: Array<[number, number]>    // [x_mm, y_mm] from raw kinematics
+  gpsStatus: GpsStatusData | null
+  tagDetections: TagDetectionEntry[]  // all currently visible tags (clears when none detected)
+  lidarPoints: LidarPointsData[]   // rolling window — newest last
+  obstacleTracks: ObstacleTrackData[]
+  virtualTarget: VirtualTargetData | null
+  rosNodes: RosNodeEntry[]
   dispatch: (topic: string, data: any, ts?: number) => void
   setMotorRecording: (motorIdx: number, active: boolean) => void
   setStepperRecording: (stepperIdx: number, active: boolean) => void
@@ -308,6 +341,15 @@ export const useRobotStore = create<RobotState>((set) => ({
   ioOutputRaw: null,
   dcPidCache: {},
   stepConfigCache: {},
+  fusedPose: null,
+  fusedPoseTrail: [],
+  odometryTrail: [],
+  gpsStatus: null,
+  tagDetections: [],
+  lidarPoints: [],
+  obstacleTracks: [],
+  virtualTarget: null,
+  rosNodes: [],
 
   clearErrorLog: () => set({ errorLog: [] }),
   clearWarningLog: () => set({ warningLog: [] }),
@@ -660,9 +702,17 @@ export const useRobotStore = create<RobotState>((set) => ({
         })
         break
 
-      case 'sensor_kinematics':
-        set({ kinematics: data as KinematicsData })
+      case 'sensor_kinematics': {
+        const kin = data as KinematicsData
+        set((state) => {
+          const pt: [number, number] = [kin.x, kin.y]
+          const trail = state.odometryTrail.length >= MAX_TRAIL_PTS
+            ? [...state.odometryTrail.slice(1), pt]
+            : [...state.odometryTrail, pt]
+          return { kinematics: kin, odometryTrail: trail }
+        })
         break
+      }
 
       case 'sensor_imu':
         set({ imu: data as IMUData })
@@ -674,6 +724,46 @@ export const useRobotStore = create<RobotState>((set) => ({
 
       case 'sensor_ultrasonic_all':
         set({ rangeSensors: buildRangeSensors(data as SensorUltrasonicAllData) })
+        break
+
+      case 'fused_pose': {
+        const fp = data as FusedPoseData
+        set((state) => {
+          const pt: [number, number] = [fp.x, fp.y]
+          const trail = state.fusedPoseTrail.length >= MAX_TRAIL_PTS
+            ? [...state.fusedPoseTrail.slice(1), pt]
+            : [...state.fusedPoseTrail, pt]
+          return { fusedPose: fp, fusedPoseTrail: trail }
+        })
+        break
+      }
+
+      case 'gps_status':
+        set({ gpsStatus: data as GpsStatusData })
+        break
+
+      case 'tag_detections':
+        set({ tagDetections: data as TagDetectionEntry[] })
+        break
+
+      case 'lidar_world_points': {
+        const frame = data as LidarPointsData
+        set((state) => ({
+          lidarPoints: [...state.lidarPoints.slice(-(LIDAR_WINDOW_FRAMES - 1)), frame],
+        }))
+        break
+      }
+
+      case 'obstacle_tracks':
+        set({ obstacleTracks: data as ObstacleTrackData[] })
+        break
+
+      case 'virtual_target':
+        set({ virtualTarget: data ? (data as VirtualTargetData) : null })
+        break
+
+      case 'ros_nodes':
+        set({ rosNodes: (data as { nodes: RosNodeEntry[] }).nodes })
         break
 
       default:

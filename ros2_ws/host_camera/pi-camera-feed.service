@@ -1,0 +1,15 @@
+[Unit]
+Description=Pi camera feed to V4L2 loopback
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/pi-camera
+ExecStart=/usr/local/bin/pi-camera-feed
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

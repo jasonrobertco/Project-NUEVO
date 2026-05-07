@@ -71,7 +71,7 @@
 
 % Frontmatter data; appears on title page
 \title{Lab 1: ROS2 Introduction and System Integration}
-\version{0.1.2}
+\version{0.1.3}
 \author{162 TAs and Maclab members}
 \softwarelogo{\includegraphics[width=8cm]{figures/capstone}}
 
@@ -147,7 +147,7 @@ and the robot application layer.
 
 Refer to:
 \begin{itemize}
-  \item \doclink{https://github.com/pochihh/Project-NUEVO/blob/main/ros2_ws/BRIDGE_RUNTIME.md}{\texttt{ros2\_ws/BRIDGE\_RUNTIME.md}} --- bridge architecture, shared runtime model, and reset recovery
+  \item \doclink{https://github.com/pochihh/Project-NUEVO/blob/main/docs/ros2/bridge_runtime.md}{\texttt{docs/ros2/bridge\_runtime.md}} --- bridge architecture, shared runtime model, and reset recovery
   \item \doclink{https://github.com/pochihh/Project-NUEVO/blob/main/docs/COMMUNICATION_PROTOCOL.md}{\texttt{docs/COMMUNICATION\_PROTOCOL.md}} --- TLV protocol, message catalog, and state machine
 \end{itemize}
 
@@ -186,7 +186,7 @@ and are added to the Docker image separately.
 
 Refer to the following for the Robot, Sensor, and Vision nodes:
 \begin{itemize}
-  \item \doclink{https://github.com/pochihh/Project-NUEVO/blob/main/ros2_ws/ROS2_NODES_DESIGN.md}{\texttt{ros2\_ws/ROS2\_NODES\_DESIGN.md}} --- package layout, design principles, and topic/service naming
+  \item \doclink{https://github.com/pochihh/Project-NUEVO/blob/main/docs/ros2/ros2_nodes_design.md}{\texttt{docs/ros2/ros2\_nodes\_design.md}} --- package layout, design principles, and topic/service naming
   \item \doclink{https://github.com/pochihh/Project-NUEVO/blob/main/ros2_ws/README.md}{\texttt{ros2\_ws/README.md}} --- Docker workflow, node startup order, and ROS2 API overview
 \end{itemize}
 
@@ -278,18 +278,119 @@ Dockerfile, Docker image vs.\ container, \texttt{docker compose}, volume mounts,
 container networking, \texttt{docker exec}, base images.
 
 
+\section{Raspberry Pi Safety and Usage}
+
+The Raspberry Pi~5 is the compute brain of your robot.
+A damaged or corrupted RPi means your whole team is blocked until it is
+re-imaged or replaced --- which can take an entire lab session.
+The failures we see most often are \emph{entirely preventable}.
+Read this section before touching the hardware.
+
+\subsection*{Power}
+
+\begin{itemize}
+  \item \textbf{Two valid power sources:}
+        \begin{itemize}
+          \item \textbf{Supplied USB-C PD adapter} (5\,V / 5\,A) --- use this
+                at your bench when the robot battery is not connected.
+          \item \textbf{Robot battery via the PCB} --- the PCB's onboard 5\,V
+                rail is rated at 6\,A and includes a hot-swap circuit that
+                safely switches between battery and bench supply.
+                This is the intended power source when the robot is running
+                autonomously.
+        \end{itemize}
+  \item \textbf{Never use a phone charger, laptop USB port, or cheap power bank.}
+        These cannot supply enough current; the resulting voltage drop causes
+        random crashes and SD card corruption.
+  \item \textbf{Never wire the battery directly to the RPi}, bypassing the PCB.
+        The PCB regulator and hot-swap circuit are there for a reason.
+  \item \textbf{Never hot-swap the SD card.}
+        If the card must be removed, shut down first (see below).
+\end{itemize}
+
+\subsection*{Shutdown procedure --- the most important habit}
+
+The RPi runs a Linux filesystem.
+Pulling the power while the OS is writing to the SD card --- which happens
+constantly in the background --- \textbf{corrupts the filesystem}.
+A corrupted SD card requires a full re-image and you lose all local work that
+was not pushed to GitHub.
+
+\medskip
+\noindent\textbf{Always shut down properly before removing power:}
+
+\begin{minted}{bash}
+sudo shutdown -h now
+\end{minted}
+
+Wait for the green activity LED to stop blinking and go dark (roughly 10--15\,s),
+\emph{then} unplug the power cable.
+This also applies when you are finished for the day and when packing up the robot.
+
+\subsection*{GPIO pins}
+
+\begin{itemize}
+  \item \textbf{GPIO logic level is 3.3\,V.}
+        The RPi is \emph{not} 5\,V tolerant on its GPIO pins.
+        Connecting a 5\,V signal directly to any GPIO pin will destroy that
+        pin and may kill the entire SoC.
+        Always use a level shifter or voltage divider when interfacing with
+        5\,V peripherals.
+  \item \textbf{Maximum current per GPIO pin is 16\,mA} (8\,mA recommended).
+        Never drive an LED, motor, or relay directly from a GPIO pin without a
+        current-limiting resistor or driver IC.
+  \item \textbf{Never short GPIO pins together}, and keep metal objects (tools,
+        loose wires, PCB offcuts) away from the board when it is powered.
+        A momentary short across the wrong pins can instantly destroy the board.
+  \item \textbf{Ground yourself} before handling the board.
+        Touch a grounded metal surface (e.g.\ a PC chassis) or wear an ESD
+        wrist strap.
+        Electrostatic discharge is invisible and silent --- and permanently damages
+        chips.
+\end{itemize}
+
+\subsection*{Physical handling}
+
+\begin{itemize}
+  \item Hold the board by its edges.
+        Finger pressure on chips or connectors can crack solder joints.
+  \item Keep the board on a \textbf{non-conductive surface} (the anti-static bag it came
+        in, or a plastic tray).
+        Placing it on a metal bench or a conductive surface shorts the bottom
+        pads.
+  \item Do not stack anything on top of the RPi when it is running.
+        The processor generates significant heat; blocking airflow causes thermal
+        throttling and instability.
+\end{itemize}
+
+\subsection*{SD card hygiene}
+
+\begin{itemize}
+  \item \textbf{Push your work to GitHub immediately.}
+        SD cards have a finite write endurance and \emph{will} eventually fail.
+        Any work that only exists on the RPi can vanish at any time (see also
+        Task~1.3).
+  \item Avoid running \texttt{apt upgrade} or long package installs when the
+        robot is on battery --- a power cut mid-upgrade corrupts the package
+        database and often requires a re-image.
+  \item If the RPi fails to boot, do \emph{not} keep trying to power-cycle it.
+        Note down any error messages on the HDMI output or status LEDs and ask
+        the TAs for help.
+\end{itemize}
+
+
 \section{Lab Activities}
 
-\subsection{Task 1: Set Up Your Repository}
+\subsection{Task 1: Set Up Your Repository}\label{sec:task1}
 
-\machinebox{\onlaptop\ your laptop \textbar\ \onrpi\ Raspberry Pi}{The repo must be cloned on \emph{both} machines. Your laptop uses it for firmware (Task~2); the RPi uses it for ROS2 (Task~3). Day-to-day edits are made on your laptop, then pulled onto the RPi.}
+\machinebox{\onlaptop\ your laptop \textbar\ \onrpi\ Raspberry Pi}{The repo must be cloned on \emph{both} machines. Your laptop uses it for firmware (Task~\ref{sec:task2}); the RPi uses it for ROS2 (Task~\ref{sec:task3}). Day-to-day edits are made on your laptop, then pulled onto the RPi.}
 
 In this course you will modify the Project NUEVO codebase to add features and
 tune your robot.
 Each team should work in their own copy of the repository so that your changes
 do not affect other teams and so you can safely experiment.
 
-\subsubsection*{1.1 Fork the Repository\onlaptop}
+\subsubsection{Fork the Repository\onlaptop}
 
 \begin{enumerate}
   \item Go to \doclink{https://github.com/pochihh/Project-NUEVO}{github.com/pochihh/Project-NUEVO}.
@@ -300,7 +401,7 @@ do not affect other teams and so you can safely experiment.
     \hfill\textit{(keyword: collaborators, repository permissions)}
 \end{enumerate}
 
-\subsubsection*{1.2 Clone the Repository — Laptop\onlaptop}
+\subsubsection{Clone the Repository --- Laptop\onlaptop}
 
 Clone your fork onto your laptop.
 You will use this copy to edit firmware, run MATLAB, and push changes to GitHub.
@@ -311,10 +412,10 @@ cd Project-NUEVO
 \end{minted}
 \hfill\textit{(keyword: clone, remote)}
 
-\subsubsection*{1.3 Clone the Repository — Raspberry Pi\onrpi}
+\subsubsection{Clone the Repository --- Raspberry Pi\onrpi}\label{ssec:clone-rpi}
 
 SSH into the Raspberry Pi and clone the \emph{same fork} there.
-The RPi copy is what Docker mounts when running the ROS2 workspace in Task~3.
+The RPi copy is what Docker mounts when running the ROS2 workspace in Task~\ref{sec:task3}.
 
 \begin{minted}{bash}
 git clone https://github.com/<your-username>/Project-NUEVO.git
@@ -334,7 +435,7 @@ time. Any work that exists \emph{only} on the RPi can be lost without warning.
 \textbf{Push every change to GitHub as soon as you make it.}
 Never leave uncommitted or unpushed work sitting on the RPi.
 
-\subsubsection*{1.4 Daily Git Workflow\onlaptop}
+\subsubsection{Daily Git Workflow\onlaptop}
 
 Git lets your whole team work on the same codebase simultaneously.
 Run these commands on your laptop:
@@ -365,7 +466,7 @@ git pull
         \hfill\textit{(keyword: pull, merge, rebase, merge conflict)}
 \end{enumerate}
 
-\subsubsection*{1.5 Pull Updates from the Original Repository\onlaptop}
+\subsubsection{Pull Updates from the Original Repository\onlaptop}
 
 Bug fixes and new features will be released to the original repository during the
 course.
@@ -393,7 +494,7 @@ git push
 \end{enumerate}
 
 
-\subsection{Task 2: Flash the Firmware}
+\subsection{Task 2: Flash the Firmware}\label{sec:task2}
 
 \machinebox{\onlaptop\ your laptop}{Arduino IDE is installed on your laptop; the Arduino is connected via USB.}
 
@@ -402,7 +503,7 @@ communicate with it.
 Full details and troubleshooting are in
 \doclink{https://github.com/pochihh/Project-NUEVO/blob/main/firmware/README.md}{\texttt{firmware/\allowbreak README.md}}.
 
-\subsubsection*{2.1 Prerequisites\onlaptop}
+\subsubsection{Prerequisites\onlaptop}
 
 \begin{enumerate}
   \item Install \textbf{Arduino IDE 2.x} and the \textbf{Arduino AVR Boards} core.
@@ -423,7 +524,7 @@ C:\Users\<your-user>\AppData\Local\Arduino15\packages\arduino\hardware\avr\1.8.7
 \end{minted}
 \end{enumerate}
 
-\subsubsection*{2.2 Build and Upload\onlaptop}
+\subsubsection{Build and Upload\onlaptop}
 
 \begin{enumerate}
   \item Open \texttt{firmware/arduino/arduino.ino} in Arduino IDE.
@@ -438,16 +539,16 @@ Confirm by opening the Arduino IDE Serial Monitor at 115\,200 baud and checking
 for heartbeat output.
 
 
-\subsection{Task 3: Bring Up the ROS2 Environment and NUEVO UI}
+\subsection{Task 3: Bring Up the ROS2 Environment and NUEVO UI}\label{sec:task3}
 
-\machinebox{\onrpi\ Raspberry Pi (SSH or direct terminal)}{Steps 3.1–3.6 run on the RPi. Step 3.7 opens in a browser on any device on the same network. Make sure you have already cloned your fork on the RPi (Task~1.3) and run \texttt{git pull} to get the latest code before starting.}
+\machinebox{\onrpi\ Raspberry Pi (SSH or direct terminal)}{Most steps run on the RPi. The final step (Access the NUEVO UI) opens in a browser on any device on the same network. Make sure you have already cloned your fork on the RPi (Section~\ref{ssec:clone-rpi}) and run \texttt{git pull} to get the latest code before starting.}
 
 In this task you will start the Docker container on the Raspberry Pi, launch the
 bridge node, and verify all hardware using the NUEVO web UI.
 Full setup details are in
 \doclink{https://github.com/pochihh/Project-NUEVO/blob/main/ros2_ws/README.md}{\texttt{ros2\_ws/README.md}}.
 
-\subsubsection*{3.1 Raspberry Pi UART Setup (one-time)\onrpi}
+\subsubsection{Raspberry Pi UART Setup (one-time)\onrpi}
 
 The bridge communicates with the Arduino over the RPi hardware UART.
 Enable it by editing the RPi boot configuration files:
@@ -466,7 +567,7 @@ dtoverlay=uart0-pi5
         device owned by the \texttt{dialout} group.
 \end{enumerate}
 
-\subsubsection*{3.2 Install Node.js and npm (one-time)\onrpi}
+\subsubsection{Install Node.js and npm (one-time)\onrpi}
 
 The NUEVO UI frontend build uses \texttt{npm}. Install Node.js and npm on the
 Raspberry Pi host first:
@@ -481,7 +582,7 @@ npm -v
 For this project, \texttt{node -v} should report a reasonably modern version
 (Node 18 or newer is a safe baseline).
 
-\subsubsection*{3.3 Build the Frontend (one-time)\onrpi}
+\subsubsection{Build the Frontend (one-time)\onrpi}
 
 The bridge serves the NUEVO web UI as a pre-built static bundle.
 Build it once from the repository root:
@@ -494,7 +595,7 @@ cd ../..
 cp -r nuevo_ui/frontend/dist/. nuevo_ui/backend/static/
 \end{minted}
 
-\subsubsection*{3.4 Install Docker (one-time)\onrpi}
+\subsubsection{Install Docker (one-time)\onrpi}
 
 For this class project, the simplest Docker setup on the Raspberry Pi is the
 official Docker convenience script:
@@ -511,7 +612,7 @@ docker compose version
 \textbf{Note:} if \texttt{newgrp docker} does not take effect cleanly in your
 shell, log out and log back in once, then re-run the version checks above.
 
-\subsubsection*{3.5 Start the Docker Container\onrpi}
+\subsubsection{Start the Docker Container\onrpi}
 
 From the repository root on the Raspberry Pi:
 
@@ -524,7 +625,7 @@ docker compose -f $COMPOSE logs -f ros2_runtime
 
 Wait until the log shows that \texttt{colcon build} finished and the container is ready.
 
-\subsubsection*{3.6 Launch the Bridge Node\onrpi}
+\subsubsection{Launch the Bridge Node\onrpi}
 
 Open a shell inside the running container and start the bridge:
 
@@ -538,7 +639,7 @@ ros2 run bridge bridge
 The bridge node connects to the Arduino, starts the WebSocket server, and begins
 publishing ROS2 topics.
 
-\subsubsection*{3.7 Access the NUEVO UI\onui}
+\subsubsection{Access the NUEVO UI\onui}
 
 Open a browser on any device on the same network and navigate to:
 \begin{center}
@@ -559,16 +660,16 @@ Use the UI to test each hardware feature:
 \end{itemize}
 
 
-\subsection{Task 4: DC Motor PI Tuning and Step Response}
+\subsection{Task 4: DC Motor PI Tuning and Step Response}\label{sec:task4}
 
-\machinebox{\onlaptop\ your laptop \textbar\ \onui\ NUEVO UI \textbar\ \onrpi\ RPi}{MATLAB analysis and gain calculations run on your laptop. Motor commands and data recording use the NUEVO UI in your browser. The RPi must be running the bridge node from Task~3.}
+\machinebox{\onlaptop\ your laptop \textbar\ \onui\ NUEVO UI \textbar\ \onrpi\ RPi}{MATLAB analysis and gain calculations run on your laptop. Motor commands and data recording use the NUEVO UI in your browser. The RPi must be running the bridge node from Task~\ref{sec:task3}.}
 
 In this task you will tune the PI velocity controller for one DC motor and record
 step responses to evaluate your design.
 The goal is to transition from the default gains to a set of gains that you can
 justify from a simple model of the motor dynamics.
 
-\subsubsection*{4.1 Model-Based PI Design (Optional)\onui\onlaptop}
+\subsubsection{Model-Based PI Design (Optional)\onui\onlaptop}\label{ssec:model-pi}
 
 A DC motor's velocity dynamics can be approximated as a first-order linear system:
 \begin{equation}
@@ -637,20 +738,20 @@ The firmware implements the equivalent difference equation internally;
 you only need to enter $K_p$ and $K_i$ (the continuous-time values) through
 the UI---the firmware's built-in discretization handles the rest at runtime.
 
-\subsubsection*{4.2 Simple Observation (Alternative to 4.1)\onui}
+\subsubsection{Simple Observation (Alternative)\onui}\label{ssec:simple-obs}
 
 If you prefer a faster approach, skip the model identification and instead adjust
 $K_p$ and $K_i$ manually while observing the step response:
 increase $K_p$ to speed up the response, increase $K_i$ to eliminate steady-state
 error, and reduce both if the response oscillates.
 
-\subsubsection*{4.3 Record and Compare Step Responses\onui\onlaptop}
+\subsubsection{Record and Compare Step Responses\onui\onlaptop}
 
 Using the NUEVO UI, command a velocity step from 0 to 1000 ticks/s and record the
 response for:
 \begin{enumerate}
   \item The \textbf{default} PI gains (as shipped in \texttt{firmware/\allowbreak arduino/\allowbreak src/\allowbreak config.h}).
-  \item Your \textbf{tuned} gains from Task~4.1 or~4.2.
+  \item Your \textbf{tuned} gains from Section~\ref{ssec:model-pi} or~\ref{ssec:simple-obs}.
 \end{enumerate}
 
 On each plot, annotate:

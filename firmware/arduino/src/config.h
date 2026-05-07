@@ -19,7 +19,7 @@
 // FIRMWARE VERSION
 // ============================================================================
 
-#define FIRMWARE_VERSION        0x00090800  // Version 0.9.8
+#define FIRMWARE_VERSION        0x00090900  // Version 0.9.9
 #define TLV_PROTOCOL_VERSION_MAJOR 4
 #define TLV_PROTOCOL_VERSION_MINOR 0
 #define BOARD_REVISION          0       // 0 = unspecified / unknown
@@ -114,8 +114,8 @@
 // Set to 1 to invert encoder count direction (flips positive/negative)
 #define ENCODER_1_DIR_INVERTED  0       // 0=normal, 1=inverted
 #define ENCODER_2_DIR_INVERTED  0       // 0=normal, 1=inverted
-#define ENCODER_3_DIR_INVERTED  1       // 0=normal, 1=inverted
-#define ENCODER_4_DIR_INVERTED  1       // 0=normal, 1=inverted
+#define ENCODER_3_DIR_INVERTED  0       // 0=normal, 1=inverted
+#define ENCODER_4_DIR_INVERTED  0       // 0=normal, 1=inverted
 
 // ============================================================================
 // ROBOT GEOMETRY — edit these to match your robot

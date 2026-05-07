@@ -1,0 +1,7 @@
+*.weights
+*.pt
+*.onnx
+*.engine
+
+# Exported NCNN runtime model folders may be tracked when they are small enough
+# for the classroom repo.

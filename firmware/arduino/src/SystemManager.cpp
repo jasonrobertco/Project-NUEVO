@@ -58,6 +58,7 @@ bool SystemManager::triggerBootCompleted() {
     if (!requestTransition(SYS_STATE_IDLE)) {
         return false;
     }
+    MessageCenter::scheduleSysInfoBroadcast();
     queueUserIoState(SYS_STATE_IDLE);
     return true;
 }

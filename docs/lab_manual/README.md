@@ -1,6 +1,9 @@
 # Lab Manuals
 
-This directory contains LaTeX source for all MAE162E lab manuals.
+This directory contains source material for the MAE162E lab manuals.
+
+Most older labs are still self-contained LaTeX projects.
+Newer operator-facing notes may live directly as Markdown.
 
 ## Structure
 
@@ -11,12 +14,17 @@ docs/lab_manual/
 │   ├── figures/               # Images included by main.tex
 │   ├── ol-softwaremanual.cls  # (unused template; kept for reference)
 │   └── ...
+├── Lab_system_setup/
+│   ├── README.md              # current markdown operations note
+│   └── figures/               # optional images used by the note
 └── README.md                  # this file
 ```
 
-## Compiling a Lab Manual
+## LaTeX Labs
 
-Each lab is a self-contained LaTeX project inside its own subdirectory. Compile from inside that directory so relative paths (`figures/`, `code/`) resolve correctly.
+Each LaTeX lab is a self-contained project inside its own subdirectory.
+Compile from inside that directory so relative paths (`figures/`, `code/`)
+resolve correctly.
 
 ### Option 1 — Overleaf (recommended for sharing)
 
@@ -93,6 +101,8 @@ tlmgr install <package-name>
 
 ## Adding a New Lab
 
+If the new lab is LaTeX-based:
+
 1. Copy an existing lab directory as a starting point:
    ```bash
    cp -r docs/lab_manual/Lab1_ROS2 docs/lab_manual/Lab2_MotionControl
@@ -101,8 +111,16 @@ tlmgr install <package-name>
 3. Add figures to the `figures/` subdirectory and reference them with `\includegraphics{figures/<name>}`
 4. Add this lab to the table below
 
+If the new lab is Markdown-based:
+
+1. Create a new lab directory
+2. Add a `README.md` as the primary document
+3. Keep any images in a local `figures/` directory
+4. Add this lab to the table below
+
 ## Lab Index
 
 | Lab | Title | Directory |
 |-----|-------|-----------|
 | 1 | ROS2 Introduction and System Integration | `Lab1_ROS2/` |
+| System Setup | Raspberry Pi setup and runtime operations | `Lab_system_setup/` |

@@ -9,8 +9,9 @@ plugins/
 .codex
 .vscode/
 .local/
+.agents/
+.plugins/
 openspec/
-*PLAN.md
 CLAUDE.md
 AGENTS.md
 
@@ -20,6 +21,11 @@ AGENTS.md
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
+ros2_ws/runtime_output/**
+!ros2_ws/runtime_output/
+!ros2_ws/runtime_output/.gitkeep
+!ros2_ws/runtime_output/**/
+!ros2_ws/runtime_output/**/.gitkeep
 .colcon_workspace
 *.colcon_workspace
 
@@ -128,6 +134,7 @@ env/
 *.fdb_latexmk
 *.fls
 *.synctex.gz
+_minted-*/
 
 # ============================================
 # Operating System
@@ -213,7 +220,6 @@ ros2_ws/src/lab_docs/
 test_data/
 logs/
 *.log
-*.png
 
 # TLV Type Generated Definitions
 # TLV_TypeDefs.h

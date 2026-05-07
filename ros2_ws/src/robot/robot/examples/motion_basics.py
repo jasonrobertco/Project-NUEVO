@@ -1,8 +1,8 @@
 """
-motion_basics.py — drive, turn, read pose, navigate to a point
-==============================================================
-This example introduces all the foundational motion APIs in one mission.
-Read it top to bottom — the states follow the natural robot startup order.
+motion_basics.py — FSM-based motion basics
+==========================================
+Teaches the core drive-motion Robot API calls using the same tick-loop pattern
+as the student-facing `main.py`.
 
 HOW TO RUN
 ----------
@@ -13,87 +13,121 @@ Copy this file over main.py, then restart the robot node:
 
 WHAT THE ROBOT DOES
 -------------------
-Press BTN_1 to start. The robot:
+Press BTN_1 to start. The robot runs the same basic motion sequence twice:
 
-  1. Moves forward 400 mm
-  2. Turns left (CCW) 90°
-  3. Prints the current odometry pose to the console
-  4. Navigates back to the origin (0, 0)
+  1. Non-blocking version:
+     - turn left 90°
+     - turn right 90°
+     - move forward 500 mm
+     - move backward 500 mm
+  2. Blocking version:
+     - turn left 90°
+     - turn right 90°
+     - move forward 500 mm
+     - move backward 500 mm
 
-When done, press BTN_1 again to repeat. BTN_2 cancels at any time.
+BTN_2 cancels the non-blocking pass and returns to IDLE. During the blocking
+pass, the robot stays inside one FSM state until that whole pass finishes.
 
 WHAT THIS TEACHES
 -----------------
-1. configure_robot()      — set unit, wheel geometry, motor mapping
-2. reset_odometry()       — zero the pose before the mission starts
-3. move_forward()         — blocking motion (waits for completion)
-4. turn_by()              — relative heading change, also blocking
-5. get_pose()             — read current (x, y, theta_deg) from odometry
-6. move_to()              — non-blocking with MotionHandle
-7. handle.is_finished()   — poll completion from the FSM loop
-8. handle.cancel()        — stop a running motion
+1. `set_odometry_parameters()` and `reset_odometry()` setup flow
+2. State-by-state non-blocking motion with `MotionHandle`
+3. One-state blocking motion with the same high-level motion methods
+4. Optional lidar and GPS enable flow during a blocking example
 """
 
 from __future__ import annotations
+
 import time
 
-from robot.hardware_map import Button, DEFAULT_FSM_HZ, LED, Motor
-from robot.robot import FirmwareState, Robot, Unit
+from robot.hardware_map import (
+    Button,
+    DEFAULT_FSM_HZ,
+    LED,
+    INITIAL_THETA_DEG,
+    LIDAR_FOV_DEG,
+    LIDAR_MOUNT_THETA_DEG,
+    LIDAR_MOUNT_X_MM,
+    LIDAR_MOUNT_Y_MM,
+    LIDAR_RANGE_MAX_MM,
+    LIDAR_RANGE_MIN_MM,
+    LEFT_WHEEL_DIR_INVERTED,
+    LEFT_WHEEL_MOTOR,
+    POSITION_UNIT,
+    RIGHT_WHEEL_DIR_INVERTED,
+    RIGHT_WHEEL_MOTOR,
+    TAG_BODY_OFFSET_X_MM,
+    TAG_BODY_OFFSET_Y_MM,
+    WHEEL_BASE,
+    WHEEL_DIAMETER,
+)
+from robot.robot import FirmwareState, Robot
+
+
+# Shared drive-base and lidar/GPS hardware calibration lives in
+# robot/hardware_map.py. If you need to change wheel geometry, wheel motors,
+# lidar mount, lidar self-filtering, or GPS tag body offset values, edit
+# ros2_ws/src/robot/robot/hardware_map.py. You can also just set those values
+# here locally if you want.
+ENABLE_LIDAR = False
+
+ENABLE_GPS = False
+
+# IMPORTANT: update TAG_ID to match the tag assigned to this robot.
+TAG_ID = -1
 
 
 # ---------------------------------------------------------------------------
-# Robot hardware configuration — edit these to match your robot
+# Configuration — edit these to match your robot
 # ---------------------------------------------------------------------------
 
-POSITION_UNIT    = Unit.MM
-WHEEL_DIAMETER   = 74.0   # mm
-WHEEL_BASE       = 333.0  # mm
-INITIAL_THETA    = 90.0   # degrees — heading at odometry reset
+TURN_DEGREES = 90.0
+FORWARD_DISTANCE_MM = 500.0
+DRIVE_VELOCITY_MM_S = 200.0
+DRIVE_TOLERANCE_MM = 20.0
+TURN_TOLERANCE_DEG = 3.0
 
-LEFT_WHEEL_MOTOR          = Motor.DC_M1
-LEFT_WHEEL_DIR_INVERTED   = False
-RIGHT_WHEEL_MOTOR         = Motor.DC_M2
-RIGHT_WHEEL_DIR_INVERTED  = True
-
-
-# ---------------------------------------------------------------------------
-# Mission parameters
-# ---------------------------------------------------------------------------
-
-FORWARD_DISTANCE  = 400.0  # mm
-TURN_DEGREES      = 90.0   # degrees CCW (positive = left turn)
-VELOCITY          = 100.0  # mm/s
-TOLERANCE         = 20.0   # mm — how close is "arrived"
-TOLERANCE_DEG     = 3.0    # degrees — turn completion threshold
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def configure_robot(robot: Robot) -> None:
-    """Apply unit and wheel geometry. Called once at startup."""
     robot.set_unit(POSITION_UNIT)
     robot.set_odometry_parameters(
         wheel_diameter=WHEEL_DIAMETER,
         wheel_base=WHEEL_BASE,
-        initial_theta_deg=INITIAL_THETA,
+        initial_theta_deg=INITIAL_THETA_DEG,
         left_motor_id=LEFT_WHEEL_MOTOR,
         left_motor_dir_inverted=LEFT_WHEEL_DIR_INVERTED,
         right_motor_id=RIGHT_WHEEL_MOTOR,
         right_motor_dir_inverted=RIGHT_WHEEL_DIR_INVERTED,
     )
 
+    if ENABLE_LIDAR:
+        robot.enable_lidar()
+        robot.set_lidar_mount(
+            x_mm=LIDAR_MOUNT_X_MM,
+            y_mm=LIDAR_MOUNT_Y_MM,
+            theta_deg=LIDAR_MOUNT_THETA_DEG,
+        )
+        robot.set_lidar_filter(
+            range_min_mm=LIDAR_RANGE_MIN_MM,
+            range_max_mm=LIDAR_RANGE_MAX_MM,
+            fov_deg=LIDAR_FOV_DEG,
+        )
+        robot.start_lidar_world_publisher()
+        print("[sensor] lidar enabled — subscribing to /scan")
+
+    if ENABLE_GPS:
+        robot.enable_gps()
+        robot.set_tracked_tag_id(TAG_ID)
+        robot.set_tag_body_offset(TAG_BODY_OFFSET_X_MM, TAG_BODY_OFFSET_Y_MM)
+        print(f"[sensor] GPS enabled — tracking ArUco tag {TAG_ID}")
+
 
 def start_robot(robot: Robot) -> None:
-    """Put firmware in RUNNING and zero the odometry pose."""
     current = robot.get_state()
     if current in (FirmwareState.ESTOP, FirmwareState.ERROR):
         robot.reset_estop()
     robot.set_state(FirmwareState.RUNNING)
-    robot.reset_odometry()
-    # Wait for the first kinematics message so get_pose() is valid.
-    robot.wait_for_pose_update(timeout=0.5)
 
 
 def show_idle_leds(robot: Robot) -> None:
@@ -101,124 +135,205 @@ def show_idle_leds(robot: Robot) -> None:
     robot.set_led(LED.GREEN, 0)
 
 
-def show_moving_leds(robot: Robot) -> None:
+def show_running_leds(robot: Robot) -> None:
     robot.set_led(LED.ORANGE, 0)
     robot.set_led(LED.GREEN, 200)
 
 
-# ---------------------------------------------------------------------------
-# run() — entry point called by the robot node
-# ---------------------------------------------------------------------------
+def cancel_motion(handle) -> None:
+    if handle is None:
+        return
+    handle.cancel()
+    handle.wait(timeout=1.0)
+
+
+def print_status(robot: Robot, label: str) -> None:
+    ox, oy, otheta = robot.get_odometry_pose()
+    if ENABLE_GPS and robot.has_fused_pose():
+        fused_pose = robot.get_fused_pose()
+        if fused_pose is not None:
+            fx, fy, ftheta = fused_pose
+            print(
+                f"  [{label}] odom=({ox:6.0f}, {oy:6.0f}) mm  θ={otheta:5.1f}°  |  "
+                f"fused=({fx:6.0f}, {fy:6.0f}) mm  θ={ftheta:5.1f}°  "
+                f"(gps_fresh={robot.is_gps_active()})"
+            )
+            return
+    print(f"  [{label}] odom=({ox:6.0f}, {oy:6.0f}) mm  θ={otheta:5.1f}°")
+
 
 def run(robot: Robot) -> None:
     configure_robot(robot)
 
     state = "INIT"
-    move_handle = None  # holds the MotionHandle for non-blocking calls
+    motion_handle = None
 
     period = 1.0 / float(DEFAULT_FSM_HZ)
     next_tick = time.monotonic()
 
     while True:
-
-        # ── INIT ──────────────────────────────────────────────────────────
-        if state == "INIT":
-            start_robot(robot)
+        if state.startswith("NON_BLOCKING_") and robot.was_button_pressed(Button.BTN_2):
+            cancel_motion(motion_handle)
+            motion_handle = None
+            robot.stop()
             show_idle_leds(robot)
-            print("[FSM] IDLE — press BTN_1 to start, BTN_2 to cancel")
+            print("[FSM] IDLE — non-blocking pass cancelled")
             state = "IDLE"
 
-        # ── IDLE ──────────────────────────────────────────────────────────
+        elif state == "INIT":
+            start_robot(robot)
+            robot.reset_odometry()
+            if not robot.wait_for_odometry_reset(timeout=2.0):
+                print("[warn] odometry reset not confirmed within 2.0s; continuing with latest pose")
+                robot.wait_for_pose_update(timeout=0.5)
+            show_idle_leds(robot)
+            print("[FSM] IDLE — press BTN_1 to start")
+            print("[FSM] BTN_2 cancels only the non-blocking pass")
+            print(
+                f"[CFG] turn={TURN_DEGREES:.0f}° forward={FORWARD_DISTANCE_MM:.0f} mm "
+                f"velocity={DRIVE_VELOCITY_MM_S:.0f} mm/s"
+            )
+            if ENABLE_LIDAR:
+                print(
+                    f"[CFG] lidar mount=({LIDAR_MOUNT_X_MM:.0f}, {LIDAR_MOUNT_Y_MM:.0f}) mm "
+                    f"theta={LIDAR_MOUNT_THETA_DEG:.1f}° filter={LIDAR_RANGE_MIN_MM:.0f}-"
+                    f"{LIDAR_RANGE_MAX_MM:.0f} mm fov={LIDAR_FOV_DEG}"
+                )
+            if ENABLE_GPS:
+                print(
+                    f"[CFG] gps tag_id={TAG_ID} tag_body=({TAG_BODY_OFFSET_X_MM:.0f}, "
+                    f"{TAG_BODY_OFFSET_Y_MM:.0f}) mm"
+                )
+            state = "IDLE"
+
         elif state == "IDLE":
             if robot.was_button_pressed(Button.BTN_1):
-                show_moving_leds(robot)
-                print("[FSM] LEG_1 — moving forward")
-
-                # blocking=True makes the call wait here until done.
-                # The FSM loop does NOT advance until the motion finishes.
-                # Simple and readable; use it when nothing else needs to
-                # happen while the robot moves.
-                robot.move_forward(
-                    distance=FORWARD_DISTANCE,
-                    velocity=VELOCITY,
-                    tolerance=TOLERANCE,
-                    blocking=True,
+                robot.reset_odometry()
+                if not robot.wait_for_odometry_reset(timeout=2.0):
+                    print("[warn] odometry reset not confirmed within 2.0s; continuing with latest pose")
+                    robot.wait_for_pose_update(timeout=0.5)
+                show_running_leds(robot)
+                print("[FSM] NON_BLOCKING_TURN_LEFT")
+                motion_handle = robot.turn_by(
+                    delta_deg=TURN_DEGREES,
+                    blocking=False,
+                    tolerance_deg=TURN_TOLERANCE_DEG,
                 )
-                state = "TURNING"
+                state = "NON_BLOCKING_WAIT_TURN_LEFT"
 
-        # ── TURNING ───────────────────────────────────────────────────────
-        elif state == "TURNING":
-            print("[FSM] TURNING — 90° left")
+        elif state == "NON_BLOCKING_WAIT_TURN_LEFT":
+            if motion_handle is not None and motion_handle.is_finished():
+                motion_handle = None
+                print_status(robot, "non-blocking turn left done")
+                print("[FSM] NON_BLOCKING_TURN_RIGHT")
+                motion_handle = robot.turn_by(
+                    delta_deg=-TURN_DEGREES,
+                    blocking=False,
+                    tolerance_deg=TURN_TOLERANCE_DEG,
+                )
+                state = "NON_BLOCKING_WAIT_TURN_RIGHT"
 
-            # turn_by also runs blocking here. The robot turns, then the
-            # FSM advances to PRINT_POSE.
+        elif state == "NON_BLOCKING_WAIT_TURN_RIGHT":
+            if motion_handle is not None and motion_handle.is_finished():
+                motion_handle = None
+                print_status(robot, "non-blocking turn right done")
+                print("[FSM] NON_BLOCKING_MOVE_FORWARD")
+                motion_handle = robot.move_forward(
+                    distance=FORWARD_DISTANCE_MM,
+                    velocity=DRIVE_VELOCITY_MM_S,
+                    tolerance=DRIVE_TOLERANCE_MM,
+                    blocking=False,
+                )
+                state = "NON_BLOCKING_WAIT_MOVE_FORWARD"
+
+        elif state == "NON_BLOCKING_WAIT_MOVE_FORWARD":
+            if motion_handle is not None and motion_handle.is_finished():
+                motion_handle = None
+                print_status(robot, "non-blocking move forward done")
+                print("[FSM] NON_BLOCKING_MOVE_BACKWARD")
+                motion_handle = robot.move_backward(
+                    distance=FORWARD_DISTANCE_MM,
+                    velocity=DRIVE_VELOCITY_MM_S,
+                    tolerance=DRIVE_TOLERANCE_MM,
+                    blocking=False,
+                )
+                state = "NON_BLOCKING_WAIT_MOVE_BACKWARD"
+
+        elif state == "NON_BLOCKING_WAIT_MOVE_BACKWARD":
+            if motion_handle is not None and motion_handle.is_finished():
+                motion_handle = None
+                print_status(robot, "non-blocking move backward done")
+                print("[FSM] NON_BLOCKING_DONE — starting blocking pass")
+                state = "START_BLOCKING_PASS"
+
+        elif state == "START_BLOCKING_PASS":
+            robot.reset_odometry()
+            if not robot.wait_for_odometry_reset(timeout=2.0):
+                print("[warn] odometry reset not confirmed within 2.0s; continuing with latest pose")
+                robot.wait_for_pose_update(timeout=0.5)
+            print("[FSM] BLOCKING_PASS")
+            state = "BLOCKING_PASS"
+
+        elif state == "BLOCKING_PASS":
+            print("[FSM] BLOCKING_TURN_LEFT")
             robot.turn_by(
                 delta_deg=TURN_DEGREES,
                 blocking=True,
-                tolerance_deg=TOLERANCE_DEG,
+                tolerance_deg=TURN_TOLERANCE_DEG,
             )
-            state = "PRINT_POSE"
-
-        # ── PRINT_POSE ────────────────────────────────────────────────────
-        elif state == "PRINT_POSE":
-            # get_pose() returns (x, y, theta_deg) in the current unit.
-            x, y, theta_deg = robot.get_pose()
-            print(f"[FSM] pose  x={x:.1f} mm  y={y:.1f} mm  θ={theta_deg:.1f}°")
-
-            print("[FSM] RETURNING — navigating to origin")
-
-            # blocking=False returns a MotionHandle immediately.
-            # The robot starts moving in a background thread.
-            # The FSM continues to the next loop iteration so it can
-            # check for cancellation while the robot is moving.
-            move_handle = robot.move_to(
-                x=0.0,
-                y=0.0,
-                velocity=VELOCITY,
-                tolerance=TOLERANCE,
-                blocking=False,
+            print_status(robot, "blocking turn left done; sleeping for 1 second")
+            time.sleep(1.0)
+            
+            print("[FSM] BLOCKING_TURN_RIGHT")
+            robot.turn_by(
+                delta_deg=-TURN_DEGREES,
+                blocking=True,
+                tolerance_deg=TURN_TOLERANCE_DEG,
             )
-            state = "RETURNING"
+            print_status(robot, "blocking turn right done; sleeping for 1 second")
+            time.sleep(1.0)
+            
+            print("[FSM] BLOCKING_MOVE_FORWARD")
+            robot.move_forward(
+                distance=FORWARD_DISTANCE_MM,
+                velocity=DRIVE_VELOCITY_MM_S,
+                tolerance=DRIVE_TOLERANCE_MM,
+                blocking=True,
+            )
+            print_status(robot, "blocking move forward done; sleeping for 1 second")
+            time.sleep(1.0)
+            
+            print("[FSM] BLOCKING_MOVE_BACKWARD")
+            robot.move_backward(
+                distance=FORWARD_DISTANCE_MM,
+                velocity=DRIVE_VELOCITY_MM_S,
+                tolerance=DRIVE_TOLERANCE_MM,
+                blocking=True,
+            )
+            print_status(robot, "blocking move backward done; sleeping for 1 second")
+            time.sleep(1.0)
+            
+            robot.stop()
+            show_idle_leds(robot)
+            print("[FSM] DONE — press BTN_1 to run again")
+            motion_handle = None
+            state = "DONE"
 
-        # ── RETURNING ─────────────────────────────────────────────────────
-        elif state == "RETURNING":
-            # BTN_2 cancels the active motion at any time.
-            if robot.get_button(Button.BTN_2):
-                if move_handle is not None:
-                    move_handle.cancel()
-                    move_handle.wait(timeout=1.0)
-                    move_handle = None
-                robot.stop()
-                show_idle_leds(robot)
-                print("[FSM] IDLE — cancelled")
-                state = "IDLE"
-
-            # is_finished() is a non-blocking poll — True once the background
-            # thread reaches the goal or times out.
-            elif move_handle is not None and move_handle.is_finished():
-                move_handle = None
-                robot.stop()
-                show_idle_leds(robot)
-                print("[FSM] DONE — press BTN_1 to run again")
-                state = "DONE"
-
-        # ── DONE ──────────────────────────────────────────────────────────
         elif state == "DONE":
             if robot.was_button_pressed(Button.BTN_1):
-                # Reset odometry so the next run starts from (0, 0) again.
+                show_running_leds(robot)
                 robot.reset_odometry()
-                robot.wait_for_pose_update(timeout=0.5)
-                show_moving_leds(robot)
-                print("[FSM] LEG_1 — moving forward")
-                robot.move_forward(
-                    distance=FORWARD_DISTANCE,
-                    velocity=VELOCITY,
-                    tolerance=TOLERANCE,
-                    blocking=True,
+                if not robot.wait_for_odometry_reset(timeout=2.0):
+                    print("[warn] odometry reset not confirmed within 2.0s; continuing with latest pose")
+                    robot.wait_for_pose_update(timeout=0.5)
+                print("[FSM] NON_BLOCKING_TURN_LEFT")
+                motion_handle = robot.turn_by(
+                    delta_deg=TURN_DEGREES,
+                    blocking=False,
+                    tolerance_deg=TURN_TOLERANCE_DEG,
                 )
-                state = "TURNING"
+                state = "NON_BLOCKING_WAIT_TURN_LEFT"
 
-        # ── Tick-rate control ─────────────────────────────────────────────
         next_tick += period
         sleep_s = next_tick - time.monotonic()
         if sleep_s > 0.0:

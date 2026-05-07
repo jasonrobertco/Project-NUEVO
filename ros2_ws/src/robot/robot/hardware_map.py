@@ -1,14 +1,46 @@
 from __future__ import annotations
 
-from enum import IntEnum
+from enum import Enum, IntEnum
 
 
+class Unit(Enum):
+    MM = 1.0
+    INCH = 25.4
+    AMERICAN = INCH
+    REST_OF_THE_WORLD = MM
+
+
+# PCB Hardware Mapping
 class Motor(IntEnum):
     DC_M1 = 1
     DC_M2 = 2
     DC_M3 = 3
     DC_M4 = 4
 
+
+# Shared robot hardware calibration.
+# Keep these values aligned with the physical robot so active examples and
+# Robot defaults can import one source of truth for the drive base, lidar
+# self-filtering, and GPS tag mounting geometry.
+POSITION_UNIT = Unit.MM
+WHEEL_DIAMETER = 74.0
+WHEEL_BASE = 333.0
+INITIAL_THETA_DEG = 90.0
+
+LEFT_WHEEL_MOTOR = Motor.DC_M1
+LEFT_WHEEL_DIR_INVERTED = False
+RIGHT_WHEEL_MOTOR = Motor.DC_M2
+RIGHT_WHEEL_DIR_INVERTED = True
+
+LIDAR_MOUNT_X_MM = 0.0
+LIDAR_MOUNT_Y_MM = 0.0
+LIDAR_MOUNT_THETA_DEG = 0.0
+LIDAR_RANGE_MIN_MM = 150.0
+LIDAR_RANGE_MAX_MM = 6000.0
+LIDAR_FOV_DEG = (-180.0, 180.0)
+
+TAG_BODY_OFFSET_X_MM = 0.0
+TAG_BODY_OFFSET_Y_MM = 0.0
 
 class Stepper(IntEnum):
     STEPPER_1 = 1
