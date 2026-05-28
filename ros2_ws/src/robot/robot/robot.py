@@ -163,7 +163,6 @@ class Robot(HardwareMixin, SensorsMixin, NavigationMixin, LegacyMixin):
     ENCODER_PPR:       int   = 1440
     INITIAL_THETA_DEG: float = HW_INITIAL_THETA_DEG
     IMU_Z_DOWN:        bool  = False
-<<<<<<< HEAD
     DEFAULT_LEFT_WHEEL_MOTOR:  int = int(HW_LEFT_WHEEL_MOTOR)
     DEFAULT_RIGHT_WHEEL_MOTOR: int = int(HW_RIGHT_WHEEL_MOTOR)
     DEFAULT_LEFT_WHEEL_DIR_INVERTED:  bool = HW_LEFT_WHEEL_DIR_INVERTED
@@ -203,16 +202,6 @@ class Robot(HardwareMixin, SensorsMixin, NavigationMixin, LegacyMixin):
     LAPF_ATTRACTION_GAIN: float = 1.0
     LAPF_FORCE_EMA_ALPHA: float = 0.35
     LAPF_INFLATION_MARGIN_MM: float = 200.0
-=======
-    DEFAULT_LEFT_WHEEL_MOTOR:  int = int(Motor.DC_M1)
-    DEFAULT_RIGHT_WHEEL_MOTOR: int = int(Motor.DC_M2)
-    DEFAULT_LEFT_WHEEL_DIR_INVERTED: bool = False
-    DEFAULT_RIGHT_WHEEL_DIR_INVERTED: bool = True
-    POSITION_ALPHA = 0.0  # complementary filter GPS weight for position fusion
-    ORIENTATION_ALPHA = 0.0  # complementary filter IMU weight for orientation fusion (IMU is not working well, so default to pure odometry for now)
-    TAG_X_OFFSET_MM = -130.0  # ArUco tag position in robot body frame x (mm, forward)
-    TAG_Y_OFFSET_MM = 0.0  # ArUco tag position in robot body frame y (mm, left)
->>>>>>> 15ab709 (Update robot orientation fusion changes)
 
     _SERVO_MIN_US: int = 1000
     _SERVO_MAX_US: int = 2000
