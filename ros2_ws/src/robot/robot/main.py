@@ -1,44 +1,84 @@
 """
-main.py — student entry point
-==============================
-This is the only file students are expected to edit.
+main.py — short maze mission using LAPF + lidar
+===============================================
+Press BTN_1 to start a short maze run. BTN_2 cancels the active goal.
 
-The structure is intentionally simple:
-- keep one plain `state` variable
-- write helper functions for robot actions
-- use `if state == "..."` inside the main loop
-
-To run:
-    ros2 run robot robot
+The mission uses `lapf_to_goal()` as the primary planner, so the robot chases
+LiDAR-shaped virtual targets instead of running pure pursuit as the top-level
+mission controller.
 """
 
 from __future__ import annotations
+
 import time
 
-from robot.robot import FirmwareState, Robot, Unit
-from robot.hardware_map import Button, DEFAULT_FSM_HZ, LED, Motor
-from robot.util import densify_polyline
-from robot.path_planner import PurePursuitPlanner
-import math
+from robot.hardware_map import (
+    Button,
+    DEFAULT_FSM_HZ,
+    INITIAL_THETA_DEG,
+    LED,
+    LIDAR_FOV_DEG,
+    LIDAR_MOUNT_THETA_DEG,
+    LIDAR_MOUNT_X_MM,
+    LIDAR_MOUNT_Y_MM,
+    LIDAR_RANGE_MAX_MM,
+    LIDAR_RANGE_MIN_MM,
+    POSITION_UNIT,
+    TAG_BODY_OFFSET_X_MM,
+    TAG_BODY_OFFSET_Y_MM,
+    WHEEL_BASE,
+    WHEEL_DIAMETER,
+)
+from robot.robot import FirmwareState, Robot
 
 
-# ---------------------------------------------------------------------------
-# Robot build configuration
-# ---------------------------------------------------------------------------
+ENABLE_LIDAR = True
+ENABLE_GPS = False
 
-POSITION_UNIT = Unit.MM
-WHEEL_DIAMETER = 74.0
-WHEEL_BASE = 333.0
-INITIAL_THETA_DEG = 90.0
+# Preserved from the earlier team-specific maze entrypoint.
+TAG_ID = 11
 
-LEFT_WHEEL_MOTOR = Motor.DC_M2
+# Preserved from working28/main28backup behavior.
+LEFT_WHEEL_MOTOR = 2
 LEFT_WHEEL_DIR_INVERTED = True
-RIGHT_WHEEL_MOTOR = Motor.DC_M1
+RIGHT_WHEEL_MOTOR = 1
 RIGHT_WHEEL_DIR_INVERTED = False
+
+MAZE_GOALS_MM = (
+    (300.0, 900.0),
+    (300.0, 1800.0),
+    (1300.0, 1800.0),
+)
+
+VELOCITY_MM_S = 140.0
+TOLERANCE_MM = 60.0
+MAX_ANGULAR_RAD_S = 1.0
+STATUS_PRINT_INTERVAL_S = 0.5
+
+LEASH_LENGTH_MM = 400.0
+REPULSION_RANGE_MM = 300.0
+TARGET_SPEED_MM_S = 200.0
+REPULSION_GAIN = 550.0
+ATTRACTION_GAIN = 1.0
+FORCE_EMA_ALPHA = 0.35
+INFLATION_MARGIN_MM = 150.0
+LEASH_HALF_ANGLE_DEG = 25.0
+
+
+def resolve_lapf_config() -> dict[str, float]:
+    return {
+        "leash_length_mm": float(LEASH_LENGTH_MM),
+        "repulsion_range_mm": float(REPULSION_RANGE_MM),
+        "target_speed_mm_s": float(TARGET_SPEED_MM_S),
+        "repulsion_gain": float(REPULSION_GAIN),
+        "attraction_gain": float(ATTRACTION_GAIN),
+        "force_ema_alpha": float(FORCE_EMA_ALPHA),
+        "inflation_margin_mm": float(INFLATION_MARGIN_MM),
+        "leash_half_angle_deg": float(LEASH_HALF_ANGLE_DEG),
+    }
 
 
 def configure_robot(robot: Robot) -> None:
-    """Apply the user unit plus robot-specific wheel mapping and odometry settings."""
     robot.set_unit(POSITION_UNIT)
     robot.set_odometry_parameters(
         wheel_diameter=WHEEL_DIAMETER,
@@ -50,99 +90,159 @@ def configure_robot(robot: Robot) -> None:
         right_motor_dir_inverted=RIGHT_WHEEL_DIR_INVERTED,
     )
 
+    if ENABLE_LIDAR:
+        robot.enable_lidar()
+        robot.set_lidar_mount(
+            x_mm=LIDAR_MOUNT_X_MM,
+            y_mm=LIDAR_MOUNT_Y_MM,
+            theta_deg=LIDAR_MOUNT_THETA_DEG,
+        )
+        robot.set_lidar_filter(
+            range_min_mm=LIDAR_RANGE_MIN_MM,
+            range_max_mm=LIDAR_RANGE_MAX_MM,
+            fov_deg=LIDAR_FOV_DEG,
+        )
+        robot.start_lidar_world_publisher()
+        print("[sensor] lidar enabled — subscribing to /scan")
 
-def show_idle_leds(robot: Robot) -> None:
-    robot.set_led(LED.GREEN, 0)
-    robot.set_led(LED.ORANGE, 255)
-
-
-def show_moving_leds(robot: Robot) -> None:
-    robot.set_led(LED.ORANGE, 0)
-    robot.set_led(LED.GREEN, 255)
+    if ENABLE_GPS:
+        robot.enable_gps()
+        robot.set_tracked_tag_id(TAG_ID)
+        robot.set_tag_body_offset(TAG_BODY_OFFSET_X_MM, TAG_BODY_OFFSET_Y_MM)
+        print(f"[sensor] GPS enabled — tracking ArUco tag {TAG_ID}")
 
 
 def start_robot(robot: Robot) -> None:
-    """Start the firmware and reset odometry before the main mission begins."""
+    current = robot.get_state()
+    if current in (FirmwareState.ESTOP, FirmwareState.ERROR):
+        robot.reset_estop()
     robot.set_state(FirmwareState.RUNNING)
+
+
+def reset_mission_pose(robot: Robot) -> None:
     robot.reset_odometry()
-    robot.wait_for_pose_update(timeout=0.2)
+    if not robot.wait_for_odometry_reset(timeout=2.0):
+        print("[warn] odometry reset not confirmed within 2.0s; continuing with latest pose")
+        robot.wait_for_pose_update(timeout=0.5)
+
+
+def show_idle_leds(robot: Robot) -> None:
+    robot.set_led(LED.ORANGE, 200)
+    robot.set_led(LED.GREEN, 0)
+
+
+def show_running_leds(robot: Robot) -> None:
+    robot.set_led(LED.ORANGE, 0)
+    robot.set_led(LED.GREEN, 200)
+
+
+def cancel_motion(robot: Robot, handle) -> None:
+    if handle is not None:
+        handle.cancel()
+        handle.wait(timeout=1.0)
+    robot.stop()
+
+
+def print_status(robot: Robot, goal_index: int) -> None:
+    x, y, theta = robot.get_odometry_pose()
+    virtual_target = robot.get_virtual_target()
+    obstacle_tracks = robot.get_obstacle_tracks()
+
+    if virtual_target is None:
+        vt_summary = "vt=(none)"
+    else:
+        vt_summary = f"vt=({virtual_target[0]:6.0f}, {virtual_target[1]:6.0f}) mm"
+
+    print(
+        f"  goal={goal_index + 1}/{len(MAZE_GOALS_MM)} "
+        f"odom=({x:6.0f}, {y:6.0f}) mm "
+        f"theta={theta:5.1f} deg "
+        f"{vt_summary} tracked={len(obstacle_tracks)}"
+    )
+
+
+def start_goal(robot: Robot, goal_index: int):
+    cfg = resolve_lapf_config()
+    goal_x, goal_y = MAZE_GOALS_MM[goal_index]
+    return robot.lapf_to_goal(
+        goal_x,
+        goal_y,
+        velocity=VELOCITY_MM_S,
+        tolerance=TOLERANCE_MM,
+        leash_length_mm=cfg["leash_length_mm"],
+        repulsion_range_mm=cfg["repulsion_range_mm"],
+        target_speed_mm_s=cfg["target_speed_mm_s"],
+        max_angular_rad_s=MAX_ANGULAR_RAD_S,
+        repulsion_gain=cfg["repulsion_gain"],
+        attraction_gain=cfg["attraction_gain"],
+        force_ema_alpha=cfg["force_ema_alpha"],
+        inflation_margin_mm=cfg["inflation_margin_mm"],
+        leash_half_angle_deg=cfg["leash_half_angle_deg"],
+        blocking=False,
+    )
 
 
 def run(robot: Robot) -> None:
     configure_robot(robot)
-    
 
     state = "INIT"
-    drive_handle = None
-    # FSM refresh rate control
+    motion_handle = None
+    goal_index = 0
+    last_status_print_at = 0.0
+
     period = 1.0 / float(DEFAULT_FSM_HZ)
     next_tick = time.monotonic()
 
     while True:
+        now = time.monotonic()
+
         if state == "INIT":
             start_robot(robot)
-            print("[FSM] INIT (odometry reset)")
-            path_control_points = [ #Define your path control points here (x, y) in mm
-                (0.0, 3052.8),
-                (-609.6, 3052.8),
-                (-609.6, 609.6),
-            ]    
-            #path1 = path_control_points
-            path1 = densify_polyline(path_control_points, spacing=20.0)
-            remaining_path = path1.copy() 
-            print("Path is ready, Entering IDLE state.")
+            reset_mission_pose(robot)
+            show_idle_leds(robot)
+            goal_index = 0
+            print("[FSM] IDLE — press BTN_1 to start the LAPF maze mission, BTN_2 to cancel")
+            print(f"[CFG] goals={MAZE_GOALS_MM}")
             state = "IDLE"
 
         elif state == "IDLE":
-            show_idle_leds(robot)
-            print("[FSM] IDLE - Press BTN_1 to enter MOVING state.")
-            if robot.get_button(Button.BTN_1):
-                LOOKAHEAD_DIST = 50.0 # Lookahead distance in mm (adjust as needed)
-                planner1 = PurePursuitPlanner(
-                    lookahead_dist=LOOKAHEAD_DIST, 
-                    max_angular=2.5, # Max angular velocity in rad/s (adjust as needed)
-                    goal_tolerance=20.0, # Distance in mm to consider the target reached (adjust as needed)
-             )
-                print("Pure Pursuit Planner is initialized. Start Moving!")
-                print("[FSM] MOVING")
+            if robot.was_button_pressed(Button.BTN_1):
+                reset_mission_pose(robot)
+                show_running_leds(robot)
+                goal_index = 0
+                motion_handle = start_goal(robot, goal_index)
+                last_status_print_at = now
+                print(f"[FSM] MOVING — started LAPF goal 1/{len(MAZE_GOALS_MM)} -> {MAZE_GOALS_MM[0]}")
                 state = "MOVING"
 
         elif state == "MOVING":
-            show_moving_leds(robot)
-            """Start your code here"""
-            # Step 1: Get current pose, including current coordinates and heading angle in degrees 
-            # using robot.get_pose() function. Store the values in current_x, current_y, and current_theta_deg variables. 
-            current_x, current_y, current_theta_deg = robot.get_pose()
-            # Step 2: Convert current_theta_deg to radians and store it in current_theta_rad variable.  
-            current_theta_rad = math.radians(current_theta_deg)
-            # Step 3: Use the _advance_remaining_path() function to update the remaining_path variable 
-            # by advancing it based on the current position (current_x, current_y) and an advance radius(20.0) mm.
-            # This will take out the waypoints that are already passed (within 20mm of the current position), 
-            # effectively "advancing" the path as the robot moves.
-            remaining_path = robot._advance_remaining_path(remaining_path, current_x, current_y, LOOKAHEAD_DIST)
-            # Step 4: Use the _lookahead_point() function to calculate the current pursuit point 
-            # in your path, defined as (current_pursuit_x, current_pursuit_y)
-            current_pursuit_x, current_pursuit_y = planner1._lookahead_point(current_x, current_y, waypoints=remaining_path)
-            # Step 5: Use the compute_velocity() function of the PurePursuitPlanner 
-            # to calculate the linear and angular velocity commands
-            linear_mm, angular_rad_s = planner1.compute_velocity((current_x, current_y, current_theta_rad), remaining_path, 140.0)
-            # Step 6: Use the robot.set_velocity() function to send the velocity commands to the robot.
-            robot.set_velocity(linear_mm, math.degrees(angular_rad_s))
-            # Step 7: Check if the current target point is reached using the 
-            # CurrentTargetReached() function of the PurePursuitPlanner.
-            # Just uncomment the following lines to enable the print statements.
-            if planner1.CurrentTargetReached(current_pursuit_x, current_pursuit_y, current_x, current_y): 
-                print("MOVING: Target reached! Stopping.")
-                robot.stop()
-                print("[FSM] IDLE")
-                state = "IDLE"         
-            
-            # Step 8: Print the current pose and current pursuit point to the console for debugging purposes.
-            # Just uncomment the following lines to enable the print statements.
-            print(f"Current Pose: ({current_x:.1f}, {current_y:.1f}, {current_theta_deg:.1f} deg)")
-            print(f"Current Pursuit Point: ({current_pursuit_x:.1f}, {current_pursuit_y:.1f})")            
-            
-        # FSM refresh rate control
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE — maze mission cancelled")
+                state = "IDLE"
+            else:
+                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                    print_status(robot, goal_index)
+                    last_status_print_at = now
+                if motion_handle is not None and motion_handle.is_finished():
+                    goal_index += 1
+                    if goal_index >= len(MAZE_GOALS_MM):
+                        print("[FSM] DONE — maze mission complete")
+                        print_status(robot, len(MAZE_GOALS_MM) - 1)
+                        robot.stop()
+                        motion_handle = None
+                        show_idle_leds(robot)
+                        print("[FSM] IDLE — press BTN_1 to run again")
+                        state = "IDLE"
+                    else:
+                        motion_handle = start_goal(robot, goal_index)
+                        print(
+                            f"[FSM] MOVING — started LAPF goal {goal_index + 1}/{len(MAZE_GOALS_MM)} "
+                            f"-> {MAZE_GOALS_MM[goal_index]}"
+                        )
+
         next_tick += period
         sleep_s = next_tick - time.monotonic()
         if sleep_s > 0.0:
