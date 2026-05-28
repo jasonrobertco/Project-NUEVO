@@ -76,7 +76,7 @@ class GroundLocalizer(Node):
         # ── Parameters ────────────────────────────────────────────────────
         self.declare_parameter("marker_size", 0.10)
         self.declare_parameter("corner_ids", [0, 1, 2, 3])
-        self.declare_parameter("rover_ids", [11, 12, 13, 14, 15, 16, 17, 18])
+        self.declare_parameter("rover_ids", [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26])
         self.declare_parameter("tcp_port", 7777)
 
         self._marker_size: float = float(self.get_parameter("marker_size").value)

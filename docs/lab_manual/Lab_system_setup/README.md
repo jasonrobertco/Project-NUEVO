@@ -197,7 +197,29 @@ sudo systemctl restart pi-camera-feed.service
 sudo journalctl -u pi-camera-feed.service -f
 ```
 
-## 8. Build / Rebuild the UI
+## 8. RPLidar C1 udev Rule (One-Time)
+
+The RPLidar C1 requires a udev rule so the device appears at `/dev/rplidar`
+with the correct permissions. Run once on the Pi host:
+
+```bash
+sudo bash ros2_ws/src/rplidar_ros/scripts/install_udev_rule.sh
+```
+
+After the script finishes, unplug and reconnect the RPLidar C1, then verify:
+
+```bash
+ls -l /dev/rplidar
+```
+
+If your user cannot access the device, add yourself to the `dialout` group,
+then log out and back in:
+
+```bash
+sudo usermod -aG dialout "$USER"
+```
+
+## 9. Build / Rebuild the UI
 
 Usually `ros2_ws/setup_rpi.sh` already builds the frontend once.
 
@@ -299,13 +321,19 @@ Vision node:
 ros2 launch vision vision_production.launch.py
 ```
 
-GPS bridge:
+Local GPS:
 
 ```bash
 ros2 launch sensors sensors.launch.py
 ```
 
-Lidar + GPS together:
+Lidar:
+
+```bash
+ros2 launch rplidar_ros rplidar_c1.launch.py
+```
+
+Lidar + GPS together (you can incldue vision and whatever node you have here):
 
 ```bash
 ros2 launch robot everything_but_robot.launch.py
@@ -373,7 +401,7 @@ Latest debug image path on host:
 ros2_ws/runtime_output/vision/latest.jpg
 ```
 
-## 14. Recommended Operator Sanity Checks
+## 15. Recommended Operator Sanity Checks
 
 After container startup:
 
@@ -399,7 +427,7 @@ Then:
 - confirm firmware reaches `RUNNING`
 - launch the intended robot node / example
 
-## 15. Common Failure Modes
+## 16. Common Failure Modes
 
 ### UI is up, but no robot response
 
@@ -438,7 +466,7 @@ If dependency layers changed, rebuild instead:
 ./ros2_ws/docker/enter_ros2.sh --build rpi
 ```
 
-## 16. Good Companion References
+## 17. Good Companion References
 
 For deeper details, use:
 - ROS2 Pi setup: [`docs/ros2/rpi_setup.md`](../../ros2/rpi_setup.md)
