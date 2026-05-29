@@ -10,6 +10,7 @@ mission controller.
 
 from __future__ import annotations
 
+import math
 import time
 
 from robot.hardware_map import (
@@ -45,9 +46,7 @@ RIGHT_WHEEL_MOTOR = 1
 RIGHT_WHEEL_DIR_INVERTED = False
 
 MAZE_GOALS_MM = (
-    (300.0, 900.0),
-    (300.0, 1800.0),
-    (1300.0, 1800.0),
+    (0.0, 700.0),
 )
 
 VELOCITY_MM_S = 140.0
@@ -80,7 +79,7 @@ def resolve_lapf_config() -> dict[str, float]:
 
 def configure_robot(robot: Robot) -> None:
     robot.set_unit(POSITION_UNIT)
-    robot.set_odometry_parameters(
+    odom_confirmed = robot.set_odometry_parameters(
         wheel_diameter=WHEEL_DIAMETER,
         wheel_base=WHEEL_BASE,
         initial_theta_deg=INITIAL_THETA_DEG,
@@ -89,6 +88,12 @@ def configure_robot(robot: Robot) -> None:
         right_motor_id=RIGHT_WHEEL_MOTOR,
         right_motor_dir_inverted=RIGHT_WHEEL_DIR_INVERTED,
     )
+    if not odom_confirmed:
+        raise RuntimeError(
+            "Odometry parameter confirmation failed; refusing to start mission. "
+            f"Expected left={LEFT_WHEEL_MOTOR} inverted={LEFT_WHEEL_DIR_INVERTED}, "
+            f"right={RIGHT_WHEEL_MOTOR} inverted={RIGHT_WHEEL_DIR_INVERTED}."
+        )
 
     if ENABLE_LIDAR:
         robot.enable_lidar()
@@ -182,6 +187,12 @@ def start_goal(robot: Robot, goal_index: int):
     )
 
 
+def distance_to_goal_mm(robot: Robot, goal_index: int) -> float:
+    x, y, _theta = robot.get_odometry_pose()
+    goal_x, goal_y = MAZE_GOALS_MM[goal_index]
+    return math.hypot(goal_x - x, goal_y - y)
+
+
 def run(robot: Robot) -> None:
     configure_robot(robot)
 
@@ -227,6 +238,18 @@ def run(robot: Robot) -> None:
                     print_status(robot, goal_index)
                     last_status_print_at = now
                 if motion_handle is not None and motion_handle.is_finished():
+                    remaining_mm = distance_to_goal_mm(robot, goal_index)
+                    if remaining_mm > TOLERANCE_MM:
+                        print(
+                            f"[warn] motion finished {remaining_mm:.0f} mm from goal "
+                            f"{goal_index + 1}; stopping instead of advancing"
+                        )
+                        robot.stop()
+                        motion_handle = None
+                        show_idle_leds(robot)
+                        print("[FSM] IDLE — press BTN_1 to run again")
+                        state = "IDLE"
+                        continue
                     goal_index += 1
                     if goal_index >= len(MAZE_GOALS_MM):
                         print("[FSM] DONE — maze mission complete")
