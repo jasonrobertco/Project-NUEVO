@@ -87,6 +87,7 @@ def configure_robot(robot: Robot) -> None:
         left_motor_dir_inverted=LEFT_WHEEL_DIR_INVERTED,
         right_motor_id=RIGHT_WHEEL_MOTOR,
         right_motor_dir_inverted=RIGHT_WHEEL_DIR_INVERTED,
+        timeout=3.0,
     )
     if not odom_confirmed:
         raise RuntimeError(
