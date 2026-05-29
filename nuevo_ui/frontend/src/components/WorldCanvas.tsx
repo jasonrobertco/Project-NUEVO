@@ -30,6 +30,29 @@ const MAP_HEIGHT_MM = VENUE_EXT.maxY - VENUE_EXT.minY
 
 interface Trails { odom: boolean; gps: boolean; fused: boolean; lidar: boolean; virtual: boolean }
 
+// Competition route mirrored from ros2_ws/src/robot/robot/main.py MAZE_GOALS_MM.
+const COURSE_ROUTE_MM: Array<[number, number]> = [
+  [0, 0],
+  [0, 2350],
+  [0, 350],
+  [180, 520],
+  [560, 760],
+  [380, 1060],
+  [560, 1380],
+  [400, 1720],
+  [560, 2050],
+  [560, 2350],
+  [560, 380],
+]
+
+const COURSE_CHECKPOINTS = [
+  { label: 'S', x: 0, y: 0 },
+  { label: '1', x: 0, y: 2350 },
+  { label: '2', x: 0, y: 350 },
+  { label: '3', x: 560, y: 2350 },
+  { label: 'F', x: 560, y: 380 },
+]
+
 const SERIES = [
   { key: 'odom'  as const, label: 'Odometry', color: '#60a5fa' },
   { key: 'fused' as const, label: 'Fused',    color: '#4ade80' },
@@ -70,7 +93,7 @@ export function WorldCanvas() {
     ctx.scale(dpr, dpr)
 
     const allPts: [number, number][] = []
-    if (trails.fused)  allPts.push(...fusedTrail)
+    if (trails.fused)  allPts.push(...COURSE_ROUTE_MM, ...fusedTrail)
     if (trails.odom)   allPts.push(...odomTrail)
     if (kinematics)    allPts.push([kinematics.x, kinematics.y])
     if (fusedPose)     allPts.push([fusedPose.x, fusedPose.y])
@@ -172,11 +195,38 @@ export function WorldCanvas() {
       ctx.fill()
     }
 
-    // Fused trail (green)
+    // Planned course route (green) based on the rough competition layout.
+    if (trails.fused && COURSE_ROUTE_MM.length > 1) {
+      ctx.beginPath()
+      ctx.strokeStyle = 'rgba(74,222,128,0.88)'
+      ctx.lineWidth = 2
+      ctx.lineJoin = 'round'
+      ctx.setLineDash([8, 6])
+      COURSE_ROUTE_MM.forEach(([wx, wy], i) => {
+        const [cx, cy] = toC(wx, wy)
+        i === 0 ? ctx.moveTo(cx, cy) : ctx.lineTo(cx, cy)
+      })
+      ctx.stroke()
+      ctx.setLineDash([])
+
+      ctx.fillStyle = 'rgba(74,222,128,0.95)'
+      ctx.font = '10px monospace'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      for (const checkpoint of COURSE_CHECKPOINTS) {
+        const [cx, cy] = toC(checkpoint.x, checkpoint.y)
+        ctx.beginPath()
+        ctx.arc(cx, cy, 4, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.fillText(checkpoint.label, cx, cy - 12)
+      }
+    }
+
+    // Live fused trail (solid lime) layered on top of the dashed planned route.
     if (trails.fused && fusedTrail.length > 1) {
       ctx.beginPath()
-      ctx.strokeStyle = 'rgba(74,222,128,0.70)'
-      ctx.lineWidth = 1.5
+      ctx.strokeStyle = 'rgba(190,242,100,0.68)'
+      ctx.lineWidth = 1.75
       ctx.lineJoin = 'round'
       fusedTrail.forEach(([wx, wy], i) => {
         const [cx, cy] = toC(wx, wy)

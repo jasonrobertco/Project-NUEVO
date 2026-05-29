@@ -1,7 +1,7 @@
 """
-main.py — short maze mission using LAPF + lidar
-===============================================
-Press BTN_1 to start a short maze run. BTN_2 cancels the active goal.
+main.py — competition maze mission using LAPF + lidar
+=====================================================
+Press BTN_1 to start the route. BTN_2 cancels the active goal.
 
 The mission uses `lapf_to_goal()` as the primary planner, so the robot chases
 LiDAR-shaped virtual targets instead of running pure pursuit as the top-level
@@ -46,7 +46,16 @@ RIGHT_WHEEL_MOTOR = 1
 RIGHT_WHEEL_DIR_INVERTED = False
 
 MAZE_GOALS_MM = (
-    (0.0, 700.0),
+    (0.0, 2350.0),
+    (0.0, 350.0),
+    (180.0, 520.0),
+    (560.0, 760.0),
+    (380.0, 1060.0),
+    (560.0, 1380.0),
+    (400.0, 1720.0),
+    (560.0, 2050.0),
+    (560.0, 2350.0),
+    (560.0, 380.0),
 )
 
 VELOCITY_MM_S = 140.0
