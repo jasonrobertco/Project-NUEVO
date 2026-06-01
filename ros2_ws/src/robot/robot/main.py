@@ -84,11 +84,10 @@ RIGHT_ANGLE_TURN_DEG = 82.0
 CHECKPOINT_1_APPROACH_DISTANCE_MM = 2600.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
 BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
-# Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
-# it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
-# 610 mm course grid (COURSE_TILE_MM). Previously written as TILE_MM * 1.5 with
-# TILE_MM = 300, which read like "1.5 tiles" but was always 450 mm; renamed to a
-# literal so it can't be confused with the course grid.
+# Post-bridge exit hop toward the obstacle section. NO LONGER USED by the mission:
+# the fixed open-loop drive landed a variable distance from the obstacle-course wall
+# (bridge drift), so it was replaced by the lidar CP2_APPROACH_WALL creep (see
+# CP2_WALL_APPROACH_* below). Kept for reference / as a fallback distance.
 BRIDGE_EXIT_DISTANCE_MM = 600.0
 
 # --- Bridge-entry wall-square correction -----------------------------------
@@ -259,6 +258,16 @@ WALL_APPROACH_TIMEOUT_S = 8.0          # watchdog for the approach drive (not un
 # the backstop if it never settles.
 WALL_APPROACH_BAND_MM = 50.0           # in-range window is [TARGET-BAND, TARGET], e.g. 200-250 mm
 WALL_APPROACH_CONFIRM_FRAMES = 3       # consecutive in-range front reads required before turning
+# Post-bridge (checkpoint 2) approach to the obstacle-course wall. This REPLACES the
+# old fixed BRIDGE_EXIT_DISTANCE_MM drive: bridge drift made that land a variable
+# distance from the wall, so instead we creep forward under lidar and only turn onto
+# the course once the front clearance settles in the same reasonable standoff band as
+# the cp3 finish (WALL_APPROACH_TARGET_MM +/- WALL_APPROACH_BAND_MM, confirmed over
+# WALL_APPROACH_CONFIRM_FRAMES reads). The wall is reliably ahead; if a frame doesn't
+# see it we keep creeping to close on it, capped by MAX_ADVANCE so we never drive
+# blind forever, with the timeout as a second backstop.
+CP2_WALL_APPROACH_MAX_ADVANCE_MM = 1200.0  # safety cap on forward creep before safe-stop
+CP2_WALL_APPROACH_TIMEOUT_S = 20.0         # watchdog (>= MAX_ADVANCE / WALL_APPROACH_SPEED_MM_S)
 CLEAR_PATH_MIN_MM = 1000.0             # straightaway is "clear" if nearest front return is beyond this
 FRONT_CONE_HALF_WIDTH_MM = 150.0       # half-width of the forward cone used to read the wall
 FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading the wall
@@ -317,10 +326,17 @@ CONE_PASS_SIDES = (1, -1, 1)           # fallback open side per cone: R/L/R -> p
 # Weave / gate geometry.
 CONE_PASS_CLEARANCE_MM = 375.0         # lateral gate offset to the open side (cone r + half robot + margin)
 CONE_PASS_CLEARANCE_TOL_MM = 75.0      # lateral slack: count as clear at (clearance - tol)
-CONE_GATE_FORWARD_MM = 250.0           # push the gate this far PAST the cone. A cone is "passed" only
-                                       # once the robot is BOTH past this forward point AND laterally
-                                       # clear, so it swings AROUND the cone instead of cutting the
-                                       # corner straight through it.
+CONE_GATE_FORWARD_MM = 250.0           # robot is "past" the cone once this far beyond it along-axis.
+                                       # A cone is "passed" only when BOTH past this point AND laterally
+                                       # clear, so it swings AROUND the cone, not through it.
+# Gate motion: a CLOSED-LOOP carrot pursuit, not a single far move_to. The robot
+# chases a carrot placed at the FULL open-side lateral offset, CONE_CARROT_LOOKAHEAD_MM
+# ahead, so it commits to the sidestep immediately. (A far move_to gives near-zero
+# pure-pursuit curvature -> the robot drove nearly straight INTO the cones.)
+CONE_CARROT_LOOKAHEAD_MM = 350.0       # how far ahead the carrot sits; smaller = sharper weave
+CONE_PURSUIT_HEADING_KP = 2.5          # P gain on heading-to-carrot error (rad/s per rad)
+CONE_PURSUIT_MAX_ANGULAR_RAD_S = 1.5   # angular-rate cap during the weave
+CONE_PURSUIT_MIN_SPEED_FRAC = 0.25     # floor on forward speed while turning hard (keeps advancing)
 # Slalom guards / motion.
 CONE_SCAN_MAX_ADVANCE_MM = 1100.0      # per-cone: fail if we advance this far in SCAN without a cone
 # Per-cone gate timeout SCALES with the distance to cover (inter-cone gaps vary),
@@ -336,7 +352,7 @@ SLALOM_SCAN_LOOKAHEAD_MM = 1600.0      # straight-ahead pursuit target distance 
 # ~25 s before weaving). Failures are caught by the per-cone guards first.
 SLALOM_SEGMENT_CEILING_S = 60.0
 
-StepKind = Literal["move_to", "turn_by", "move_forward", "square_to_wall"]
+StepKind = Literal["move_to", "turn_by", "move_forward", "square_to_wall", "approach_wall"]
 
 
 @dataclass(frozen=True)
@@ -358,7 +374,10 @@ MISSION_STEPS: tuple[MissionStep, ...] = (
     MissionStep("square up to bridge axis", "square_to_wall", 0.0),
     MissionStep("cross bridge", "move_forward", BRIDGE_CROSS_DISTANCE_MM),
     MissionStep("turn left after bridge", "turn_by", -RIGHT_ANGLE_TURN_DEG),
-    MissionStep("drive past bridge exit toward obstacle section", "move_forward", BRIDGE_EXIT_DISTANCE_MM),
+    # Lidar creep to the obstacle-course wall (replaces the old fixed
+    # BRIDGE_EXIT_DISTANCE_MM drive). Handled by the CP2_APPROACH_WALL state, not a
+    # MotionHandle; value is unused. Stops at WALL_APPROACH_TARGET_MM +/- BAND.
+    MissionStep("approach obstacle-course wall (lidar)", "approach_wall", 0.0),
     MissionStep("turn left toward obstacle course", "turn_by", -RIGHT_ANGLE_TURN_DEG),
 
     # Checkpoint 2 reached here. Robot should be facing the cones/obstacle
@@ -885,17 +904,20 @@ def start_scan(robot: Robot, sl: dict, now: float):
     return robot.move_to(tx, ty, velocity=SLALOM_SPEED_MM_S, tolerance=DRIVE_TOLERANCE_MM, blocking=False)
 
 
-def start_gate(robot: Robot, sl: dict, cone: dict, now: float):
-    """Begin pure-pursuit to the gate beside+past the identified cone, offset to
-    the open side. Returns the motion handle."""
+def start_gate(robot: Robot, sl: dict, cone: dict, now: float) -> None:
+    """Set up the gate for the identified cone. The motion itself is a closed-loop
+    carrot pursuit driven each tick in CP3_SLALOM_GATE (no MotionHandle), so this
+    just records the target lateral offset and the watchdog timeout.
+
+    Target lateral D (axis frame) = cone's D offset CONE_PASS_CLEARANCE_MM to the
+    open side. The robot is driven straight to that lateral line (carrot at the full
+    offset, a short lookahead ahead) so it commits to the sidestep immediately.
+    """
     s_robot, d_robot = robot_axis_sd(robot, sl)
     sign = cone_open_side_sign(sl, cone, d_robot)
-    heading = sl["heading_rad"]
-    perp = heading + sign * (math.pi / 2.0)
-    gate_x = cone["x"] + math.cos(heading) * CONE_GATE_FORWARD_MM + math.cos(perp) * CONE_PASS_CLEARANCE_MM
-    gate_y = cone["y"] + math.sin(heading) * CONE_GATE_FORWARD_MM + math.sin(perp) * CONE_PASS_CLEARANCE_MM
     sl["current_cone_s"] = cone["S"]
     sl["current_cone_d"] = cone["D"]
+    sl["gate_d"] = cone["D"] + sign * CONE_PASS_CLEARANCE_MM
     sl["gate_started_at"] = now
     # Scale the gate timeout to the distance still to cover (gate forward point
     # minus current advance), so wider inter-cone gaps get proportionally more time.
@@ -907,10 +929,28 @@ def start_gate(robot: Robot, sl: dict, cone: dict, now: float):
     side = "left" if sign > 0 else "right"
     print(
         f"[FSM] cp3 slalom - cone {sl['cone_index']}/3 at S={cone['S']:.0f} D={cone['D']:.0f} "
-        f"r={cone['r']:.0f} mm - passing {side}, gate=({gate_x:.0f}, {gate_y:.0f}), "
+        f"r={cone['r']:.0f} mm - passing {side} to D={sl['gate_d']:.0f}, "
         f"timeout={sl['gate_timeout_s']:.1f} s"
     )
-    return robot.move_to(gate_x, gate_y, velocity=SLALOM_SPEED_MM_S, tolerance=DRIVE_TOLERANCE_MM, blocking=False)
+
+
+def drive_gate_carrot(robot: Robot, sl: dict) -> None:
+    """One tick of the closed-loop weave: steer toward a carrot at the gate's
+    lateral offset, CONE_CARROT_LOOKAHEAD_MM ahead along the approach axis."""
+    x_mm, y_mm, theta_deg = robot.get_pose()
+    s_robot, _ = robot_axis_sd(robot, sl)
+    heading = sl["heading_rad"]
+    carrot_s = s_robot + CONE_CARROT_LOOKAHEAD_MM
+    carrot_d = sl["gate_d"]
+    # axis-frame (S forward, D +left) -> world
+    cx = sl["start_mm"][0] + carrot_s * math.cos(heading) - carrot_d * math.sin(heading)
+    cy = sl["start_mm"][1] + carrot_s * math.sin(heading) + carrot_d * math.cos(heading)
+    desired = math.atan2(cy - y_mm, cx - x_mm)
+    err = (desired - math.radians(theta_deg) + math.pi) % (2.0 * math.pi) - math.pi
+    angular = max(-CONE_PURSUIT_MAX_ANGULAR_RAD_S,
+                  min(CONE_PURSUIT_MAX_ANGULAR_RAD_S, CONE_PURSUIT_HEADING_KP * err))
+    linear = SLALOM_SPEED_MM_S * max(CONE_PURSUIT_MIN_SPEED_FRAC, math.cos(err))
+    robot.set_velocity(linear, math.degrees(angular))
 
 
 def settle_forward(robot: Robot, sl: dict, s_robot: float):
@@ -1284,12 +1324,107 @@ def run(robot: Robot) -> None:
                             )
                             last_status_print_at = now
                             state = "OBSTACLE_AVOIDANCE"
+                    elif MISSION_STEPS[step_index].kind == "approach_wall":
+                        # Closed-loop lidar creep to the obstacle-course wall - its
+                        # own state, not a MotionHandle the MOVING loop can poll.
+                        robot.stop()
+                        motion_handle = None
+                        x0, y0, _ = robot.get_pose()
+                        av["cp2_wall_start_x"] = x0
+                        av["cp2_wall_start_y"] = y0
+                        av["cp2_wall_started_at"] = now
+                        av["cp2_wall_inrange_count"] = 0
+                        last_status_print_at = now
+                        print(
+                            f"[FSM] MOVING - step {step_index + 1}/{len(MISSION_STEPS)}: "
+                            f"{MISSION_STEPS[step_index].label}"
+                        )
+                        state = "CP2_APPROACH_WALL"
                     else:
                         motion_handle = start_step(robot, MISSION_STEPS[step_index])
                         print(
                             f"[FSM] MOVING - started step {step_index + 1}/{len(MISSION_STEPS)}: "
                             f"{MISSION_STEPS[step_index].label}"
                         )
+
+        elif state == "CP2_APPROACH_WALL":
+            # Post-bridge approach: creep toward the obstacle-course wall and only turn
+            # onto the course once the front clearance has settled in the reasonable
+            # standoff band (same checker as the cp3 finish). The wall is reliably
+            # ahead, so an out-of-range/not-yet-seen read means keep creeping; the
+            # MAX_ADVANCE cap and timeout below are the backstops.
+            if robot.was_button_pressed(Button.BTN_2):
+                robot.stop()
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - post-bridge wall approach cancelled")
+                state = "IDLE"
+            else:
+                front = front_clearance_mm(robot)
+                in_lower = WALL_APPROACH_TARGET_MM - WALL_APPROACH_BAND_MM
+                in_range = in_lower <= front <= WALL_APPROACH_TARGET_MM
+                x, y, theta = robot.get_pose()
+                advanced = math.hypot(
+                    x - av["cp2_wall_start_x"], y - av["cp2_wall_start_y"]
+                )
+
+                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                    front_str = "inf" if math.isinf(front) else f"{front:.0f}"
+                    print(
+                        f"  cp2 wall approach odom=({x:6.0f}, {y:6.0f}) mm "
+                        f"theta={theta:5.1f} deg front={front_str} mm "
+                        f"advanced={advanced:.0f}/{CP2_WALL_APPROACH_MAX_ADVANCE_MM:.0f} mm "
+                        f"(want {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm, "
+                        f"in-range {av['cp2_wall_inrange_count']}/{WALL_APPROACH_CONFIRM_FRAMES})"
+                    )
+                    last_status_print_at = now
+
+                if in_range:
+                    # In the reasonable standoff band: hold and require a few
+                    # consecutive in-range reads so a single noisy frame can't fire
+                    # the turn at the wrong distance.
+                    robot.stop()
+                    av["cp2_wall_inrange_count"] += 1
+                    if av["cp2_wall_inrange_count"] >= WALL_APPROACH_CONFIRM_FRAMES:
+                        print(
+                            f"[FSM] post-bridge wall standoff confirmed at {front:.0f} mm "
+                            f"(within {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm "
+                            f"for {WALL_APPROACH_CONFIRM_FRAMES} reads) - "
+                            "turning onto obstacle course"
+                        )
+                        step_index += 1
+                        motion_handle = start_step(robot, MISSION_STEPS[step_index])
+                        print(
+                            f"[FSM] MOVING - started step {step_index + 1}/{len(MISSION_STEPS)}: "
+                            f"{MISSION_STEPS[step_index].label}"
+                        )
+                        last_status_print_at = now
+                        state = "MOVING"
+                elif advanced >= CP2_WALL_APPROACH_MAX_ADVANCE_MM:
+                    safe_stop_to_idle(
+                        robot,
+                        f"post-bridge wall approach exceeded {CP2_WALL_APPROACH_MAX_ADVANCE_MM:.0f} mm "
+                        "without reaching the wall standoff (check wall detection / standoffs)",
+                    )
+                    state = "IDLE"
+                elif (now - av["cp2_wall_started_at"]) >= CP2_WALL_APPROACH_TIMEOUT_S:
+                    safe_stop_to_idle(
+                        robot,
+                        "post-bridge wall approach timed out - front never settled in the "
+                        f"{in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm range",
+                    )
+                    state = "IDLE"
+                elif math.isfinite(front) and front < in_lower:
+                    # Closer than the band's lower edge: too close to creep further.
+                    # Hold and keep sampling - jitter may settle back into range; the
+                    # backstops above handle a genuinely-too-close stall.
+                    robot.stop()
+                    av["cp2_wall_inrange_count"] = 0
+                else:
+                    # front > target, or wall not yet in the forward cone (inf): keep
+                    # creeping forward to close on / find the wall.
+                    av["cp2_wall_inrange_count"] = 0
+                    robot.set_velocity(WALL_APPROACH_SPEED_MM_S, 0.0)
 
         elif state == "OBSTACLE_AVOIDANCE":
             if robot.was_button_pressed(Button.BTN_2):
@@ -1507,10 +1642,12 @@ def run(robot: Robot) -> None:
                 # else: keep creeping/scanning (motion continues)
 
         elif state == "CP3_SLALOM_GATE":
-            # Pure-pursuit the gate beside+past the current cone; advance once the
-            # robot is past the cone along the approach axis.
+            # Closed-loop carrot weave: steer to the open-side lateral offset and
+            # past the cone (velocity-controlled, no MotionHandle). A cone is
+            # cleared only when BOTH past the forward point AND laterally clear, so
+            # it swings AROUND the cone instead of driving straight into it.
             if robot.was_button_pressed(Button.BTN_2):
-                cancel_motion(robot, motion_handle)
+                robot.stop()
                 motion_handle = None
                 restore_lidar_full(robot)
                 show_idle_leds(robot)
@@ -1524,25 +1661,20 @@ def run(robot: Robot) -> None:
                         f"  cp3 slalom gate cone {sl['cone_index']}/3 "
                         f"S={s_robot:6.0f} D={d_robot:6.0f} mm "
                         f"(cone S={sl['current_cone_s']:.0f} D={sl['current_cone_d']:.0f} "
-                        f"sep={lateral_sep:.0f})"
+                        f"target D={sl['gate_d']:.0f} sep={lateral_sep:.0f})"
                     )
                     last_status_print_at = now
 
-                # A cone is cleared only when the robot has BOTH driven past the
-                # gate's forward point AND achieved lateral clearance from the
-                # cone. Forward-only (the old test) let it cut the corner straight
-                # through the cone before the sidestep completed.
                 past_gate = s_robot >= sl["current_cone_s"] + CONE_GATE_FORWARD_MM
                 lateral_clear = lateral_sep >= (CONE_PASS_CLEARANCE_MM - CONE_PASS_CLEARANCE_TOL_MM)
-                reached_gate = motion_handle is not None and motion_handle.is_finished()
-                gate_done = lateral_clear and (past_gate or reached_gate)
+                gate_done = lateral_clear and past_gate
                 if (now - sl["started_at"]) >= SLALOM_SEGMENT_CEILING_S:
-                    cancel_motion(robot, motion_handle)
+                    robot.stop()
                     motion_handle = None
                     slalom_fail(robot, sl, "cp3 slalom timed out (segment ceiling)")
                     state = "IDLE"
                 elif gate_done:
-                    cancel_motion(robot, motion_handle)
+                    robot.stop()
                     motion_handle = None
                     print(
                         f"[FSM] cp3 slalom - cone {sl['cone_index']}/3 passed "
@@ -1559,7 +1691,7 @@ def run(robot: Robot) -> None:
                         last_status_print_at = now
                         state = "CP3_SLALOM_SCAN"
                 elif (now - sl["gate_started_at"]) >= sl["gate_timeout_s"]:
-                    cancel_motion(robot, motion_handle)
+                    robot.stop()
                     motion_handle = None
                     slalom_fail(
                         robot,
@@ -1568,7 +1700,8 @@ def run(robot: Robot) -> None:
                         f"{sl['gate_timeout_s']:.1f} s",
                     )
                     state = "IDLE"
-                # else: keep pursuing the gate
+                else:
+                    drive_gate_carrot(robot, sl)
 
         elif state == "CP3_SLALOM_EXIT":
             # Past cone 3: settle forward, confirm no more cones ahead and the
