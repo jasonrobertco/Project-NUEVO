@@ -3,8 +3,8 @@ main.py - checkpoint 2 bridge mission
 =====================================
 Press BTN_1 to start the route. BTN_2 cancels the active motion.
 
-This version intentionally does not use LiDAR, LAPF, or obstacle avoidance.
-The robot follows a short odometry-only sequence:
+The robot follows a short odometry-only sequence to checkpoint 2, then switches
+to LiDAR/LAPF obstacle avoidance for the later checkpoint sections.
 
 1. drive forward to the checkpoint 1 approach point
 2. turn right 90 degrees
@@ -12,13 +12,29 @@ The robot follows a short odometry-only sequence:
 4. turn right 90 degrees
 5. drive forward across the bridge/ramp
 6. turn left 90 degrees
-7. drive forward 1.5 tiles
+7. drive past the bridge exit toward the obstacle section
 8. turn left 90 degrees toward the obstacle course
+9. obstacle-avoid straight 5 course tiles  (LAPF, with watchdog + recovery)
+10. turn right 90 degrees
+11. drive forward 1 course tile
+12. turn right 90 degrees to finish checkpoint 3
+13. obstacle-avoid straight 5 course tiles to checkpoint 4, then stop (LAPF)
+14. checkpoint 5 manipulator placeholder (scaffold only)
+
+LAPF watchdog/recovery (steps 9 & 13):
+    A LAPF segment can stall in an APF local minimum (attraction ~= repulsion)
+    or get boxed in; the planner loop only ends on goal-or-cancel, so without a
+    watchdog the FSM would hang forever. Each segment is monitored by a
+    no-progress detector (authoritative) and a per-attempt wall-clock cap
+    (last resort). On a stall the FSM runs a bounded, symmetry-breaking,
+    rear-guarded back-up-and-retry; after the retry budget it safe-stops to
+    IDLE. BTN_2 cleanly cancels at every point, including mid-recovery.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Literal
 import time
 
@@ -27,6 +43,12 @@ from robot.hardware_map import (
     DEFAULT_FSM_HZ,
     INITIAL_THETA_DEG,
     LED,
+    LIDAR_FOV_DEG,
+    LIDAR_MOUNT_THETA_DEG,
+    LIDAR_MOUNT_X_MM,
+    LIDAR_MOUNT_Y_MM,
+    LIDAR_RANGE_MAX_MM,
+    LIDAR_RANGE_MIN_MM,
     POSITION_UNIT,
     WHEEL_BASE,
     WHEEL_DIAMETER,
@@ -45,10 +67,112 @@ DRIVE_TOLERANCE_MM = 60.0
 TURN_TOLERANCE_DEG = 3.0
 STATUS_PRINT_INTERVAL_S = 0.5
 
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 3350.0
-BRIDGE_ALIGN_DISTANCE_MM = 150.0
-BRIDGE_CROSS_DISTANCE_MM = 2200.0
-TILE_MM = 300.0
+# Checkpoint 1/2 scripted distances. These are EMPIRICALLY HAND-TUNED on the
+# physical bridge/ramp, not derived from the course grid. Do not change them
+# without re-tuning on the venue — the cp1/2 sequence is meant to stay
+# behaviorally fixed.
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 3350.0   # start -> checkpoint 1 approach point
+BRIDGE_ALIGN_DISTANCE_MM = 150.0             # short nudge into the bridge lane
+BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
+# Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
+# it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
+# 610 mm course grid (COURSE_TILE_MM). Previously written as TILE_MM * 1.5 with
+# TILE_MM = 300, which read like "1.5 tiles" but was always 450 mm; renamed to a
+# literal so it can't be confused with the course grid.
+BRIDGE_EXIT_DISTANCE_MM = 450.0
+
+# Checkpoint 2 and later obstacle-avoidance course sections.
+# The UI/course grid uses 610 mm cells (see WorldCanvas.tsx / vm_demo.py).
+COURSE_TILE_MM = 610.0
+CHECKPOINT_3_APPROACH_TILES = 5.0
+CHECKPOINT_3_FINAL_STRAIGHT_TILES = 1.0
+CHECKPOINT_4_STRAIGHT_TILES = 5.0
+RIGHT_TURN_DEG = 90.0
+
+CHECKPOINT_3_APPROACH_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_APPROACH_TILES
+CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_FINAL_STRAIGHT_TILES
+CHECKPOINT_4_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_4_STRAIGHT_TILES
+
+# LAPF tuning for the checkpoint 2+ obstacle-avoidance runs:
+# - OBSTACLE_AVOIDANCE_SPEED_MM_S: lower if the robot reacts too late or slips.
+# - OBSTACLE_AVOIDANCE_TOLERANCE_MM: larger accepts a looser checkpoint arrival.
+# - LAPF_LEASH_LENGTH_MM: how far the virtual target can run ahead of the robot.
+#   Smaller is more cautious; larger is smoother but can cut closer to cones.
+# - LAPF_REPULSION_RANGE_MM: how early tracked obstacles affect the virtual target.
+#   Increase if avoidance starts too late; decrease if it swerves too early.
+# - LAPF_TARGET_SPEED_MM_S: virtual-target motion speed. Lower damps aggressive
+#   target motion; higher lets the virtual target move around obstacles faster.
+# - LAPF_REPULSION_GAIN: obstacle push strength. Increase if it clips obstacles;
+#   decrease if it overreacts or oscillates.
+# - LAPF_FORCE_EMA_ALPHA: force smoothing. Lower is smoother/slower to react;
+#   higher follows the newest LiDAR obstacle estimate more aggressively.
+# - LAPF_INFLATION_MARGIN_MM: extra radius added around each tracked obstacle.
+#   Increase this for more clearance around cones.
+# - LAPF_LEASH_HALF_ANGLE_DEG: forward cone for the virtual target. Smaller keeps
+#   the robot driving straighter; larger allows wider avoidance maneuvers.
+OBSTACLE_AVOIDANCE_SPEED_MM_S = 140.0
+OBSTACLE_AVOIDANCE_TOLERANCE_MM = 60.0
+OBSTACLE_AVOIDANCE_MAX_ANGULAR_RAD_S = 1.0
+LAPF_LEASH_LENGTH_MM = 400.0
+LAPF_REPULSION_RANGE_MM = 300.0
+LAPF_TARGET_SPEED_MM_S = 200.0
+LAPF_REPULSION_GAIN = 550.0
+LAPF_ATTRACTION_GAIN = 1.0
+LAPF_FORCE_EMA_ALPHA = 0.35
+LAPF_INFLATION_MARGIN_MM = 150.0
+LAPF_LEASH_HALF_ANGLE_DEG = 25.0
+
+# ---------------------------------------------------------------------------
+# LAPF stall watchdog + recovery (checkpoint 2+ obstacle-avoidance segments).
+#
+# Detection (per active LAPF attempt):
+#   - No-progress (AUTHORITATIVE): if the best distance-to-goal has not improved
+#     by >= NO_PROGRESS_EPS_MM within NO_PROGRESS_WINDOW_S, the robot is stuck.
+#     -> recover + retry.
+#   - Per-attempt wall-clock (LAST RESORT): catches a "slow orbit" that keeps
+#     netting >EPS progress per window but never converges. Scales with the
+#     remaining distance so retries (shorter remaining distance) get a tighter
+#     cap. -> safe-stop, NOT retried (retrying an orbit doesn't help).
+#   - Segment hard ceiling: a global backstop over the whole segment including
+#     all recovery actions. -> safe-stop.
+#
+# Recovery (bounded, symmetry-breaking, rear-guarded):
+#   Backing up and re-issuing the IDENTICAL goal would walk back into the same
+#   symmetric local minimum. So each retry also (a) reverses to add clearance
+#   (guarded — see below), (b) reorients the heading by an alternating offset,
+#   and (c) re-issues toward a goal shifted laterally to the alternating side.
+#   Perturbing heading + goal breaks the goal/obstacle collinearity that creates
+#   the force null, so the attempt cannot reproduce the identical stall. The
+#   lateral side alternates per retry so the second attempt tries the other side
+#   if the first stayed blocked.
+#
+#   Blind reverse is unmodeled by the forward-facing planner, so before any
+#   reverse we check the rear LiDAR sector (confirmed tracks) for clearance and
+#   hard-cap the reverse distance. If the rear isn't clear we skip the reverse
+#   and do reorientation only (or safe-stop).
+NO_PROGRESS_WINDOW_S = 4.0
+NO_PROGRESS_EPS_MM = 50.0
+WALLCLOCK_CAP_FACTOR = 1.5
+WALLCLOCK_CAP_FLOOR_S = 12.0
+SEGMENT_HARD_CEILING_S = 35.0
+MAX_AVOIDANCE_RETRIES = 2
+
+RECOVERY_REVERSE_MM = 300.0              # nominal back-up distance
+RECOVERY_MIN_REVERSE_MM = 50.0           # below this, skip the reverse entirely
+RECOVERY_REVERSE_SPEED_MM_S = 100.0      # slow, so BTN_2 polling stays responsive
+RECOVERY_REVERSE_TOLERANCE_MM = 40.0
+RECOVERY_REVERSE_MARGIN_MM = 150.0       # keep this clearance behind the robot
+RECOVERY_MIN_REAR_CLEARANCE_MM = 250.0   # min rear clearance to allow reversing
+RECOVERY_REVERSE_TIMEOUT_S = 3.0
+RECOVERY_HEADING_OFFSET_DEG = 25.0       # ~leash half-angle, to reaim the cone
+RECOVERY_REORIENT_TIMEOUT_S = 2.0
+RECOVERY_LATERAL_OFFSET_MM = 275.0       # ~inflation_margin + max disk radius
+REAR_SECTOR_HALF_ANGLE_DEG = 60.0        # +/- around directly-behind
+
+# Allow a little slack over the LAPF goal tolerance when confirming that a
+# finished LAPF handle actually reached the goal (vs the motion thread ending
+# early). Lets us tell success from failure on completion.
+SUCCESS_MARGIN_MM = 20.0
 
 StepKind = Literal["move_to", "turn_by", "move_forward"]
 
@@ -69,13 +193,12 @@ MISSION_STEPS: tuple[MissionStep, ...] = (
     # Checkpoint 1 reached here.
     MissionStep("cross bridge", "move_forward", BRIDGE_CROSS_DISTANCE_MM),
     MissionStep("turn left after bridge", "turn_by", -90.0),
-    MissionStep("drive 1.5 tiles toward obstacle section", "move_forward", TILE_MM * 1.5),
+    MissionStep("drive past bridge exit toward obstacle section", "move_forward", BRIDGE_EXIT_DISTANCE_MM),
     MissionStep("turn left toward obstacle course", "turn_by", -90.0),
 
-    # Checkpoint 2 reached here. Robot should be facing the cones/obstacle course.
-    # TODO: Start obstacle avoidance algorithm here.
-    # Future implementation should switch from odometry-only scripted motion
-    # to LiDAR/LAPF-based obstacle navigation for the obstacle course section.
+    # Checkpoint 2 reached here. Robot should be facing the cones/obstacle
+    # course. The FSM switches to LAPF obstacle avoidance after this scripted
+    # checkpoint 1/2 sequence finishes.
 )
 
 
@@ -97,6 +220,20 @@ def configure_robot(robot: Robot) -> None:
             f"Expected left={LEFT_WHEEL_MOTOR} inverted={LEFT_WHEEL_DIR_INVERTED}, "
             f"right={RIGHT_WHEEL_MOTOR} inverted={RIGHT_WHEEL_DIR_INVERTED}."
         )
+
+    robot.enable_lidar()
+    robot.set_lidar_mount(
+        x_mm=LIDAR_MOUNT_X_MM,
+        y_mm=LIDAR_MOUNT_Y_MM,
+        theta_deg=LIDAR_MOUNT_THETA_DEG,
+    )
+    robot.set_lidar_filter(
+        range_min_mm=LIDAR_RANGE_MIN_MM,
+        range_max_mm=LIDAR_RANGE_MAX_MM,
+        fov_deg=LIDAR_FOV_DEG,
+    )
+    robot.start_lidar_world_publisher()
+    print("[sensor] lidar enabled for checkpoint 2+ obstacle avoidance")
 
 
 def start_robot(robot: Robot) -> None:
@@ -130,6 +267,13 @@ def cancel_motion(robot: Robot, handle) -> None:
     robot.stop()
 
 
+def safe_stop_to_idle(robot: Robot, reason: str) -> None:
+    """Stop the base and show idle LEDs after an unrecoverable failure."""
+    robot.stop()
+    show_idle_leds(robot)
+    print(f"[FSM] IDLE - {reason}")
+
+
 def start_step(robot: Robot, step: MissionStep):
     if step.kind == "move_to":
         x_mm, y_mm = step.value
@@ -159,6 +303,241 @@ def start_step(robot: Robot, step: MissionStep):
     raise ValueError(f"Unknown mission step kind: {step.kind}")
 
 
+def straight_ahead_goal_from_current_pose(robot: Robot, distance_mm: float) -> tuple[float, float]:
+    """Return a world-frame goal straight ahead of the current robot heading."""
+    x_mm, y_mm, theta_deg = robot.get_pose()
+    theta_rad = math.radians(theta_deg)
+    return (
+        x_mm + math.cos(theta_rad) * distance_mm,
+        y_mm + math.sin(theta_rad) * distance_mm,
+    )
+
+
+def issue_lapf(robot: Robot, label: str, goal_mm: tuple[float, float]):
+    """Start a non-blocking LAPF run toward an explicit world-frame goal."""
+    goal_x_mm, goal_y_mm = goal_mm
+    print(f"[route] {label}: LAPF obstacle avoidance to goal=({goal_x_mm:.0f}, {goal_y_mm:.0f})")
+    return robot.lapf_to_goal(
+        goal_x_mm,
+        goal_y_mm,
+        velocity=OBSTACLE_AVOIDANCE_SPEED_MM_S,
+        tolerance=OBSTACLE_AVOIDANCE_TOLERANCE_MM,
+        leash_length_mm=LAPF_LEASH_LENGTH_MM,
+        repulsion_range_mm=LAPF_REPULSION_RANGE_MM,
+        target_speed_mm_s=LAPF_TARGET_SPEED_MM_S,
+        max_angular_rad_s=OBSTACLE_AVOIDANCE_MAX_ANGULAR_RAD_S,
+        repulsion_gain=LAPF_REPULSION_GAIN,
+        attraction_gain=LAPF_ATTRACTION_GAIN,
+        force_ema_alpha=LAPF_FORCE_EMA_ALPHA,
+        inflation_margin_mm=LAPF_INFLATION_MARGIN_MM,
+        leash_half_angle_deg=LAPF_LEASH_HALF_ANGLE_DEG,
+        blocking=False,
+    )
+
+
+def remaining_to_goal_mm(robot: Robot, goal_mm: tuple[float, float]) -> float:
+    x_mm, y_mm, _ = robot.get_pose()
+    return math.hypot(goal_mm[0] - x_mm, goal_mm[1] - y_mm)
+
+
+def attempt_cap_s(remaining_mm: float) -> float:
+    """Per-attempt wall-clock cap, scaled to the remaining distance."""
+    nominal_s = remaining_mm / max(OBSTACLE_AVOIDANCE_SPEED_MM_S, 1e-6)
+    return max(WALLCLOCK_CAP_FLOOR_S, WALLCLOCK_CAP_FACTOR * nominal_s)
+
+
+def rear_clearance_mm(robot: Robot) -> float:
+    """Distance to the nearest confirmed obstacle edge in the rear sector.
+
+    Returns +inf when no confirmed track sits behind the robot. Used to decide
+    whether reversing during recovery is safe (the planner only models forward
+    obstacles, so a blind reverse must be guarded).
+    """
+    x_mm, y_mm, theta_deg = robot.get_pose()
+    rear_dir_rad = math.radians(theta_deg) + math.pi
+    half_rad = math.radians(REAR_SECTOR_HALF_ANGLE_DEG)
+    nearest = math.inf
+    for track in robot.get_obstacle_tracks():
+        dx = float(track["x"]) - x_mm
+        dy = float(track["y"]) - y_mm
+        dist = math.hypot(dx, dy)
+        if dist <= 1e-6:
+            return 0.0
+        rel = abs((math.atan2(dy, dx) - rear_dir_rad + math.pi) % (2.0 * math.pi) - math.pi)
+        if rel <= half_rad:
+            nearest = min(nearest, dist - float(track["radius"]))
+    return nearest
+
+
+def perturbed_goal_mm(
+    base_goal_mm: tuple[float, float],
+    seg_heading_rad: float,
+    sign: int,
+) -> tuple[float, float]:
+    """Shift the segment goal laterally (perpendicular to the segment heading).
+
+    `sign` alternates the side per retry. Working in the software theta frame
+    keeps this consistent with turn_by()/get_pose() regardless of the firmware's
+    physical left/right convention.
+    """
+    perp_rad = seg_heading_rad + sign * (math.pi / 2.0)
+    return (
+        base_goal_mm[0] + math.cos(perp_rad) * RECOVERY_LATERAL_OFFSET_MM,
+        base_goal_mm[1] + math.sin(perp_rad) * RECOVERY_LATERAL_OFFSET_MM,
+    )
+
+
+def begin_avoidance_segment(
+    robot: Robot,
+    av: dict,
+    label: str,
+    distance_mm: float,
+    next_state: str,
+    now: float,
+):
+    """Start a LAPF segment and (re)initialize its watchdog context in `av`."""
+    goal_mm = straight_ahead_goal_from_current_pose(robot, distance_mm)
+    _, _, theta_deg = robot.get_pose()
+    handle = issue_lapf(robot, label, goal_mm)
+    remaining = remaining_to_goal_mm(robot, goal_mm)
+    av.clear()
+    av.update(
+        {
+            "label": label,
+            "base_goal_mm": goal_mm,
+            "seg_heading_rad": math.radians(theta_deg),
+            "goal_mm": goal_mm,
+            "next_state": next_state,
+            "retry_count": 0,
+            "recovery_sign": 1,
+            "started_at": now,
+            "attempt_started_at": now,
+            "attempt_cap_s": attempt_cap_s(remaining),
+            "best_remaining_mm": remaining,
+            "best_remaining_at": now,
+            "recovery_started_at": now,
+        }
+    )
+    return handle
+
+
+def evaluate_watchdog(robot: Robot, av: dict, now: float) -> str:
+    """Decide the fate of an in-progress LAPF attempt.
+
+    Returns 'continue', 'recover', or 'giveup'. Updates progress tracking.
+    """
+    remaining = remaining_to_goal_mm(robot, av["goal_mm"])
+    if remaining < av["best_remaining_mm"] - NO_PROGRESS_EPS_MM:
+        av["best_remaining_mm"] = remaining
+        av["best_remaining_at"] = now
+
+    # Global backstop over the whole segment (all attempts + recovery actions).
+    if (now - av["started_at"]) >= SEGMENT_HARD_CEILING_S:
+        return "giveup"
+
+    # No-progress is authoritative: a genuine stall trips this within seconds.
+    if (now - av["best_remaining_at"]) >= NO_PROGRESS_WINDOW_S:
+        return "recover" if av["retry_count"] < MAX_AVOIDANCE_RETRIES else "giveup"
+
+    # Slow-orbit last resort: still netting progress but not converging in time.
+    # Retrying an orbit doesn't help, so give up rather than retry.
+    if (now - av["attempt_started_at"]) >= av["attempt_cap_s"]:
+        return "giveup"
+
+    return "continue"
+
+
+def start_recovery(robot: Robot, av: dict, now: float):
+    """Begin a recovery attempt (current LAPF motion must already be cancelled).
+
+    Returns (next_state, motion_handle). Reverses if the rear is clear, else
+    skips straight to reorientation.
+    """
+    av["retry_count"] += 1
+    av["recovery_sign"] = 1 if (av["retry_count"] % 2 == 1) else -1
+    av["recovery_started_at"] = now
+
+    rear = rear_clearance_mm(robot)
+    if math.isinf(rear):
+        reverse_dist = RECOVERY_REVERSE_MM
+    elif rear >= RECOVERY_MIN_REAR_CLEARANCE_MM:
+        reverse_dist = min(RECOVERY_REVERSE_MM, rear - RECOVERY_REVERSE_MARGIN_MM)
+    else:
+        reverse_dist = 0.0
+
+    if reverse_dist >= RECOVERY_MIN_REVERSE_MM:
+        print(
+            f"[FSM] recovery {av['retry_count']}/{MAX_AVOIDANCE_RETRIES}: "
+            f"reversing {reverse_dist:.0f} mm (rear clearance="
+            f"{'inf' if math.isinf(rear) else f'{rear:.0f} mm'})"
+        )
+        handle = robot.move_backward(
+            reverse_dist,
+            velocity=RECOVERY_REVERSE_SPEED_MM_S,
+            tolerance=RECOVERY_REVERSE_TOLERANCE_MM,
+            blocking=False,
+        )
+        return "OBSTACLE_RECOVERY_REVERSE", handle
+
+    print(
+        f"[FSM] recovery {av['retry_count']}/{MAX_AVOIDANCE_RETRIES}: "
+        f"rear clearance {rear:.0f} mm too low - skipping reverse, reorienting only"
+    )
+    handle = robot.turn_by(
+        av["recovery_sign"] * RECOVERY_HEADING_OFFSET_DEG,
+        tolerance_deg=TURN_TOLERANCE_DEG,
+        blocking=False,
+    )
+    return "OBSTACLE_RECOVERY_REORIENT", handle
+
+
+def reissue_after_recovery(robot: Robot, av: dict, now: float):
+    """Re-issue LAPF toward a perturbed goal and reset the per-attempt watchdog."""
+    new_goal = perturbed_goal_mm(av["base_goal_mm"], av["seg_heading_rad"], av["recovery_sign"])
+    av["goal_mm"] = new_goal
+    handle = issue_lapf(robot, f"{av['label']} (retry {av['retry_count']})", new_goal)
+    remaining = remaining_to_goal_mm(robot, new_goal)
+    av["attempt_started_at"] = now
+    av["attempt_cap_s"] = attempt_cap_s(remaining)
+    av["best_remaining_mm"] = remaining
+    av["best_remaining_at"] = now
+    return handle
+
+
+def run_manipulator_placeholder(robot: Robot) -> None:
+    """Checkpoint 5 scaffold: aim + fire one ball with PLACEHOLDER values.
+
+    The yaw/pitch/distance below are UNTUNED guesses (see shooter.py); replace
+    with the real cp5 sequence and tune on the physical build. Imported lazily
+    so a missing/incomplete manipulator never blocks the navigation mission.
+    NOTE: Shooter.aim_and_shoot() blocks (internal time.sleep), so BTN_2 cannot
+    interrupt during the shot. This is acceptable here because cp5 runs after the
+    robot has already stopped at checkpoint 4.
+    """
+    print("[FSM] CHECKPOINT 5 - manipulator placeholder (UNTUNED scaffold)")
+    try:
+        from robot.shooter import Shooter
+
+        # TODO(cp5): replace placeholder aim/distance with tuned, mission-correct
+        # values and the real shot sequence (target selection, multiple shots…).
+        PLACEHOLDER_YAW_DEG = 120.0
+        PLACEHOLDER_PITCH_DEG = 130.0
+        PLACEHOLDER_TARGET_DISTANCE_M = 1.5
+
+        shooter = Shooter(robot)
+        shooter.enable()
+        try:
+            shooter.aim_and_shoot(
+                PLACEHOLDER_YAW_DEG,
+                PLACEHOLDER_PITCH_DEG,
+                PLACEHOLDER_TARGET_DISTANCE_M,
+            )
+        finally:
+            shooter.disable()
+    except Exception as exc:  # noqa: BLE001 - scaffold must never crash the mission
+        print(f"[warn] manipulator placeholder skipped: {exc}")
+
+
 def print_status(robot: Robot, step_index: int) -> None:
     x, y, theta = robot.get_odometry_pose()
     step = MISSION_STEPS[step_index]
@@ -170,11 +549,34 @@ def print_status(robot: Robot, step_index: int) -> None:
     )
 
 
+def print_obstacle_avoidance_status(robot: Robot, goal_mm: tuple[float, float] | None) -> None:
+    x, y, theta = robot.get_pose()
+    virtual_target = robot.get_virtual_target()
+    obstacle_tracks = robot.get_obstacle_tracks()
+    if goal_mm is None:
+        remaining_summary = "goal=(unknown)"
+    else:
+        remaining_mm = math.hypot(goal_mm[0] - x, goal_mm[1] - y)
+        remaining_summary = f"remaining={remaining_mm:6.0f} mm"
+
+    if virtual_target is None:
+        vt_summary = "vt=(none)"
+    else:
+        vt_summary = f"vt=({virtual_target[0]:6.0f}, {virtual_target[1]:6.0f}) mm"
+
+    print(
+        f"  obstacle avoidance odom=({x:6.0f}, {y:6.0f}) mm "
+        f"theta={theta:5.1f} deg {remaining_summary} "
+        f"{vt_summary} tracked={len(obstacle_tracks)}"
+    )
+
+
 def run(robot: Robot) -> None:
     configure_robot(robot)
 
     state = "INIT"
     motion_handle = None
+    av: dict = {}  # active obstacle-avoidance segment + watchdog context
     step_index = 0
     last_status_print_at = 0.0
 
@@ -189,8 +591,30 @@ def run(robot: Robot) -> None:
             reset_mission_pose(robot)
             show_idle_leds(robot)
             step_index = 0
-            print("[FSM] IDLE - press BTN_1 to start checkpoint 2 bridge mission, BTN_2 to cancel")
-            print(f"[CFG] steps={MISSION_STEPS}")
+            av = {}
+            print("[FSM] IDLE - press BTN_1 to start checkpoint 3 mission, BTN_2 to cancel")
+            print(
+                f"[CFG] scripted steps ({len(MISSION_STEPS)}): "
+                + ", ".join(step.label for step in MISSION_STEPS)
+            )
+            print(
+                "[CFG] checkpoint 2+ obstacle avoidance: "
+                f"cp3_approach={CHECKPOINT_3_APPROACH_DISTANCE_MM:.0f} mm "
+                f"cp3_final_straight={CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM:.0f} mm "
+                f"cp4={CHECKPOINT_4_DISTANCE_MM:.0f} mm "
+                f"speed={OBSTACLE_AVOIDANCE_SPEED_MM_S:.0f} mm/s "
+                f"tolerance={OBSTACLE_AVOIDANCE_TOLERANCE_MM:.0f} mm "
+                f"leash={LAPF_LEASH_LENGTH_MM:.0f} mm "
+                f"repulsion_range={LAPF_REPULSION_RANGE_MM:.0f} mm "
+                f"inflation={LAPF_INFLATION_MARGIN_MM:.0f} mm"
+            )
+            print(
+                "[CFG] LAPF watchdog: "
+                f"no_progress={NO_PROGRESS_EPS_MM:.0f} mm / {NO_PROGRESS_WINDOW_S:.1f} s "
+                f"attempt_cap={WALLCLOCK_CAP_FACTOR:.1f}x (floor {WALLCLOCK_CAP_FLOOR_S:.0f} s) "
+                f"segment_ceiling={SEGMENT_HARD_CEILING_S:.0f} s "
+                f"max_retries={MAX_AVOIDANCE_RETRIES}"
+            )
             state = "IDLE"
 
         elif state == "IDLE":
@@ -198,6 +622,7 @@ def run(robot: Robot) -> None:
                 reset_mission_pose(robot)
                 show_running_leds(robot)
                 step_index = 0
+                av = {}
                 motion_handle = start_step(robot, MISSION_STEPS[step_index])
                 last_status_print_at = now
                 print(f"[FSM] MOVING - started step 1/{len(MISSION_STEPS)}: {MISSION_STEPS[0].label}")
@@ -218,19 +643,211 @@ def run(robot: Robot) -> None:
                 if motion_handle is not None and motion_handle.is_finished():
                     step_index += 1
                     if step_index >= len(MISSION_STEPS):
-                        print("[FSM] DONE - bridge crossing complete")
                         print_status(robot, len(MISSION_STEPS) - 1)
-                        robot.stop()
-                        motion_handle = None
-                        show_idle_leds(robot)
-                        print("[FSM] IDLE - press BTN_1 to run again")
-                        state = "IDLE"
+                        print("[FSM] CHECKPOINT 2 - starting obstacle avoidance toward checkpoint 3")
+                        motion_handle = begin_avoidance_segment(
+                            robot,
+                            av,
+                            "checkpoint 2 -> checkpoint 3 approach",
+                            CHECKPOINT_3_APPROACH_DISTANCE_MM,
+                            next_state="CHECKPOINT_3_TURN_RIGHT_1",
+                            now=now,
+                        )
+                        last_status_print_at = now
+                        state = "OBSTACLE_AVOIDANCE"
                     else:
                         motion_handle = start_step(robot, MISSION_STEPS[step_index])
                         print(
                             f"[FSM] MOVING - started step {step_index + 1}/{len(MISSION_STEPS)}: "
                             f"{MISSION_STEPS[step_index].label}"
                         )
+
+        elif state == "OBSTACLE_AVOIDANCE":
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - obstacle avoidance cancelled")
+                state = "IDLE"
+            else:
+                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                    print_obstacle_avoidance_status(robot, av.get("goal_mm"))
+                    last_status_print_at = now
+
+                if motion_handle is not None and motion_handle.is_finished():
+                    # A finished handle means goal-reached OR the motion thread
+                    # ended early (e.g. error). Confirm we are actually at the
+                    # goal before treating it as success.
+                    remaining = remaining_to_goal_mm(robot, av["goal_mm"])
+                    if remaining <= OBSTACLE_AVOIDANCE_TOLERANCE_MM + SUCCESS_MARGIN_MM:
+                        print_obstacle_avoidance_status(robot, av.get("goal_mm"))
+                        next_state = av["next_state"]
+                        if next_state == "CHECKPOINT_3_TURN_RIGHT_1":
+                            print("[FSM] checkpoint 3 approach complete - turning right")
+                            motion_handle = robot.turn_by(
+                                RIGHT_TURN_DEG,
+                                tolerance_deg=TURN_TOLERANCE_DEG,
+                                blocking=False,
+                            )
+                            last_status_print_at = now
+                            state = "CHECKPOINT_3_TURN_RIGHT_1"
+                        else:  # CHECKPOINT_5_MANIPULATOR
+                            print("[FSM] CHECKPOINT 4 reached - stopping before checkpoint 5")
+                            robot.stop()
+                            motion_handle = None
+                            state = "CHECKPOINT_5_MANIPULATOR"
+                    else:
+                        # Ended without reaching the goal - treat as a stall.
+                        print(
+                            f"[FSM] LAPF ended {remaining:.0f} mm short of goal "
+                            f"({av['label']}) - attempting recovery"
+                        )
+                        if av["retry_count"] < MAX_AVOIDANCE_RETRIES:
+                            motion_handle = None
+                            state, motion_handle = start_recovery(robot, av, now)
+                            last_status_print_at = now
+                        else:
+                            motion_handle = None
+                            safe_stop_to_idle(robot, f"LAPF failed ({av['label']}) - retries exhausted")
+                            state = "IDLE"
+                else:
+                    action = evaluate_watchdog(robot, av, now)
+                    if action == "recover":
+                        print(
+                            f"[FSM] LAPF stalled ({av['label']}) - "
+                            f"no progress for {NO_PROGRESS_WINDOW_S:.0f} s, recovering"
+                        )
+                        cancel_motion(robot, motion_handle)
+                        motion_handle = None
+                        state, motion_handle = start_recovery(robot, av, now)
+                        last_status_print_at = now
+                    elif action == "giveup":
+                        cancel_motion(robot, motion_handle)
+                        motion_handle = None
+                        safe_stop_to_idle(robot, f"LAPF failed ({av['label']}) - giving up")
+                        state = "IDLE"
+                    # action == "continue": keep tracking
+
+        elif state == "OBSTACLE_RECOVERY_REVERSE":
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - recovery reverse cancelled")
+                state = "IDLE"
+            else:
+                reverse_done = motion_handle is not None and motion_handle.is_finished()
+                reverse_timeout = (now - av["recovery_started_at"]) >= RECOVERY_REVERSE_TIMEOUT_S
+                if (now - av["started_at"]) >= SEGMENT_HARD_CEILING_S:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    safe_stop_to_idle(robot, f"LAPF failed ({av['label']}) - segment timeout in recovery")
+                    state = "IDLE"
+                elif reverse_done or reverse_timeout:
+                    if not reverse_done:
+                        cancel_motion(robot, motion_handle)
+                    motion_handle = robot.turn_by(
+                        av["recovery_sign"] * RECOVERY_HEADING_OFFSET_DEG,
+                        tolerance_deg=TURN_TOLERANCE_DEG,
+                        blocking=False,
+                    )
+                    av["recovery_started_at"] = now
+                    state = "OBSTACLE_RECOVERY_REORIENT"
+
+        elif state == "OBSTACLE_RECOVERY_REORIENT":
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - recovery reorient cancelled")
+                state = "IDLE"
+            else:
+                reorient_done = motion_handle is not None and motion_handle.is_finished()
+                reorient_timeout = (now - av["recovery_started_at"]) >= RECOVERY_REORIENT_TIMEOUT_S
+                if (now - av["started_at"]) >= SEGMENT_HARD_CEILING_S:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    safe_stop_to_idle(robot, f"LAPF failed ({av['label']}) - segment timeout in recovery")
+                    state = "IDLE"
+                elif reorient_done or reorient_timeout:
+                    if not reorient_done:
+                        cancel_motion(robot, motion_handle)
+                    motion_handle = reissue_after_recovery(robot, av, now)
+                    last_status_print_at = now
+                    state = "OBSTACLE_AVOIDANCE"
+
+        elif state == "CHECKPOINT_3_TURN_RIGHT_1":
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - checkpoint 3 first right turn cancelled")
+                state = "IDLE"
+            elif motion_handle is not None and motion_handle.is_finished():
+                print("[FSM] checkpoint 3 first right turn complete - driving 1 tile")
+                motion_handle = robot.move_forward(
+                    CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM,
+                    velocity=DRIVE_VELOCITY_MM_S,
+                    tolerance=DRIVE_TOLERANCE_MM,
+                    blocking=False,
+                )
+                last_status_print_at = now
+                state = "CHECKPOINT_3_FINAL_STRAIGHT"
+
+        elif state == "CHECKPOINT_3_FINAL_STRAIGHT":
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - checkpoint 3 final straight cancelled")
+                state = "IDLE"
+            else:
+                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                    x, y, theta = robot.get_odometry_pose()
+                    print(
+                        f"  checkpoint 3 final straight odom=({x:6.0f}, {y:6.0f}) mm "
+                        f"theta={theta:5.1f} deg"
+                    )
+                    last_status_print_at = now
+
+                if motion_handle is not None and motion_handle.is_finished():
+                    print("[FSM] checkpoint 3 final straight complete - turning right")
+                    motion_handle = robot.turn_by(
+                        RIGHT_TURN_DEG,
+                        tolerance_deg=TURN_TOLERANCE_DEG,
+                        blocking=False,
+                    )
+                    last_status_print_at = now
+                    state = "CHECKPOINT_3_TURN_RIGHT_2"
+
+        elif state == "CHECKPOINT_3_TURN_RIGHT_2":
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - checkpoint 3 second right turn cancelled")
+                state = "IDLE"
+            elif motion_handle is not None and motion_handle.is_finished():
+                print("[FSM] CHECKPOINT 3 reached - starting checkpoint 4 obstacle avoidance")
+                motion_handle = begin_avoidance_segment(
+                    robot,
+                    av,
+                    "checkpoint 3 -> checkpoint 4",
+                    CHECKPOINT_4_DISTANCE_MM,
+                    next_state="CHECKPOINT_5_MANIPULATOR",
+                    now=now,
+                )
+                last_status_print_at = now
+                state = "OBSTACLE_AVOIDANCE"
+
+        elif state == "CHECKPOINT_5_MANIPULATOR":
+            # Robot is stopped at checkpoint 4. Run the manipulator scaffold once,
+            # then return to IDLE. (Placeholder/untuned — see function docstring.)
+            run_manipulator_placeholder(robot)
+            motion_handle = None
+            show_idle_leds(robot)
+            print("[FSM] IDLE - press BTN_1 to run again")
+            state = "IDLE"
 
         next_tick += period
         sleep_s = next_tick - time.monotonic()
