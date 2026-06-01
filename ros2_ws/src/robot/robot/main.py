@@ -83,7 +83,7 @@ RIGHT_ANGLE_TURN_DEG = 82.0
 # behaviorally fixed.
 CHECKPOINT_1_APPROACH_DISTANCE_MM = 2600.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 2100.0            # length of the bridge/ramp crossing
+BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
 # it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
 # 610 mm course grid (COURSE_TILE_MM). Previously written as TILE_MM * 1.5 with
@@ -107,6 +107,7 @@ BRIDGE_EXIT_DISTANCE_MM = 600.0
 # (no turn) whenever the scan is ambiguous, so a noisy read cannot make the
 # crossing worse.
 BRIDGE_SQUARE_ENABLED = True
+BRIDGE_SQUARE_DEBUG = True                 # dump the per-sector scan at square-up (tuning aid)
 BRIDGE_LEFT_WALL_DIST_MM = 200.0          # expected perpendicular distance to the left wall
 BRIDGE_REAR_WALL_DIST_MM = 500.0          # expected distance to the wall behind
 BRIDGE_WALL_BAND_MM = 250.0               # keep points within +/- this of the expected standoff
@@ -248,6 +249,17 @@ CHECKPOINT_3_MIN_ADVANCE_MM = 2150.0
 WALL_APPROACH_TARGET_MM = 250.0        # stop this far from the wall (the re-zero)
 WALL_APPROACH_SPEED_MM_S = 80.0        # slow closed-loop approach speed
 WALL_APPROACH_TIMEOUT_S = 8.0          # watchdog for the approach drive (not under LAPF watchdog)
+# The standoff the turn actually fires at is variable run-to-run: the creep only
+# samples the front cone once per FSM tick and lidar returns jitter, so a single
+# noisy frame dipping to the target would otherwise commit the turn at the wrong
+# distance. Before turning we require the front clearance to read inside a
+# "reasonable range" -- between the target and WALL_APPROACH_BAND_MM nearer than it
+# -- for WALL_APPROACH_CONFIRM_FRAMES consecutive ticks. Until then we keep creeping
+# (if still beyond the band) or hold (if jittering / too close), and every check is
+# logged so the real standoff at turn-time is visible. WALL_APPROACH_TIMEOUT_S is
+# the backstop if it never settles.
+WALL_APPROACH_BAND_MM = 50.0           # in-range window is [TARGET-BAND, TARGET], e.g. 200-250 mm
+WALL_APPROACH_CONFIRM_FRAMES = 3       # consecutive in-range front reads required before turning
 CLEAR_PATH_MIN_MM = 1000.0             # straightaway is "clear" if nearest front return is beyond this
 FRONT_CONE_HALF_WIDTH_MM = 150.0       # half-width of the forward cone used to read the wall
 FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading the wall
@@ -585,6 +597,32 @@ def _fit_line_angle_deg(points: list[tuple[float, float]]) -> float | None:
     return math.degrees(0.5 * math.atan2(2.0 * sxy, sxx - syy))
 
 
+def _log_wall_diagnostics(cloud: list[tuple[float, float]]) -> None:
+    """One-shot dump of the LiDAR cloud by robot-frame sector, to reveal the
+    true wall standoffs and orientations at the bridge mouth for tuning.
+
+    fwd = +x, left = +y. For each sector prints the point count, the nearest
+    return (the standoff to put in BRIDGE_*_WALL_DIST_MM), and the line-fit
+    angle (a clean parallel/perpendicular wall reads near 0 / +/-90).
+    """
+    sectors = {
+        "front (+x)": [(x, y) for (x, y) in cloud if x > 0 and abs(y) <= abs(x)],
+        "rear  (-x)": [(x, y) for (x, y) in cloud if x < 0 and abs(y) <= abs(x)],
+        "left  (+y)": [(x, y) for (x, y) in cloud if y > 0 and abs(x) <= abs(y)],
+        "right (-y)": [(x, y) for (x, y) in cloud if y < 0 and abs(x) <= abs(y)],
+    }
+    print(f"[bridge-square] scan dump: {len(cloud)} pts total")
+    for name, pts in sectors.items():
+        if not pts:
+            print(f"[bridge-square]   {name}:   0 pts")
+            continue
+        nearest = min(math.hypot(x, y) for (x, y) in pts)
+        angle = _fit_line_angle_deg(pts)
+        angle_s = f"{angle:+6.1f}" if angle is not None else "   n/a"
+        print(f"[bridge-square]   {name}: {len(pts):3d} pts  "
+              f"nearest={nearest:6.0f} mm  fit_angle={angle_s} deg")
+
+
 def estimate_bridge_heading_error_deg(robot: Robot) -> float:
     """Heading error (deg) at the bridge mouth, measured against the walls.
 
@@ -601,6 +639,9 @@ def estimate_bridge_heading_error_deg(robot: Robot) -> float:
         return 0.0
 
     cloud = robot.get_obstacles()  # robot frame, mm: fwd=+x, left=+y
+
+    if BRIDGE_SQUARE_DEBUG:
+        _log_wall_diagnostics(cloud)
 
     # Left wall: points off the +y side, near the expected standoff, within a
     # forward/back window so we fit the local segment beside the robot.
@@ -1584,6 +1625,7 @@ def run(robot: Robot) -> None:
                 )
                 motion_handle = None
                 av["wall_approach_started_at"] = now
+                av["wall_inrange_count"] = 0
                 last_status_print_at = now
                 state = "CP3_APPROACH_WALL"
 
@@ -1599,40 +1641,66 @@ def run(robot: Robot) -> None:
                 state = "IDLE"
             else:
                 front = front_clearance_mm(robot)
+                in_lower = WALL_APPROACH_TARGET_MM - WALL_APPROACH_BAND_MM
+                # "In range" only when the front cone reads a plausible final standoff:
+                # at/under the target but no nearer than the band's lower edge. This is
+                # the checker that keeps the variable stop distance honest before turning.
+                in_range = in_lower <= front <= WALL_APPROACH_TARGET_MM
+
                 if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
                     x, y, theta = robot.get_pose()
                     front_str = "inf" if math.isinf(front) else f"{front:.0f}"
                     print(
                         f"  cp3 wall approach odom=({x:6.0f}, {y:6.0f}) mm "
-                        f"theta={theta:5.1f} deg front={front_str} mm"
+                        f"theta={theta:5.1f} deg front={front_str} mm "
+                        f"(want {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm, "
+                        f"in-range {av['wall_inrange_count']}/{WALL_APPROACH_CONFIRM_FRAMES})"
                     )
                     last_status_print_at = now
 
-                if front <= WALL_APPROACH_TARGET_MM:
+                if in_range:
+                    # In the reasonable standoff band: hold and require a few
+                    # consecutive in-range reads so a single noisy frame can't fire
+                    # the turn at the wrong distance.
                     robot.stop()
-                    print(
-                        f"[FSM] reached wall standoff ({front:.0f} mm) - "
-                        "facing finish straightaway"
-                    )
-                    motion_handle = robot.turn_by(
-                        CP3_FACE_STRAIGHTAWAY_TURN_DEG,
-                        tolerance_deg=TURN_TOLERANCE_DEG,
-                        blocking=False,
-                    )
-                    last_status_print_at = now
-                    state = "CP3_FACE_STRAIGHTAWAY"
+                    av["wall_inrange_count"] += 1
+                    if av["wall_inrange_count"] >= WALL_APPROACH_CONFIRM_FRAMES:
+                        print(
+                            f"[FSM] wall standoff confirmed at {front:.0f} mm "
+                            f"(within {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm "
+                            f"for {WALL_APPROACH_CONFIRM_FRAMES} reads) - "
+                            "facing finish straightaway"
+                        )
+                        motion_handle = robot.turn_by(
+                            CP3_FACE_STRAIGHTAWAY_TURN_DEG,
+                            tolerance_deg=TURN_TOLERANCE_DEG,
+                            blocking=False,
+                        )
+                        last_status_print_at = now
+                        state = "CP3_FACE_STRAIGHTAWAY"
                 elif (now - av["wall_approach_started_at"]) >= WALL_APPROACH_TIMEOUT_S:
                     safe_stop_to_idle(
                         robot,
-                        "cp3 wall approach timed out - wall not reached "
+                        "cp3 wall approach timed out - front never settled in the "
+                        f"{in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm range "
                         "(check detection / standoffs / turn sign)",
                     )
                     state = "IDLE"
+                elif math.isfinite(front) and front < in_lower:
+                    # Nearer than the band's lower edge: too close to creep further.
+                    # Hold and keep sampling - jitter may settle back into range; if it
+                    # stays this close the timeout above safe-stops rather than turning
+                    # at a bad standoff.
+                    robot.stop()
+                    av["wall_inrange_count"] = 0
                 elif math.isfinite(front):
+                    # Still beyond the band (front > target): creep closer.
+                    av["wall_inrange_count"] = 0
                     robot.set_velocity(WALL_APPROACH_SPEED_MM_S, 0.0)
                 else:
                     # Wall not in the forward cone - hold rather than drive blind;
                     # the timeout above will flag it.
+                    av["wall_inrange_count"] = 0
                     robot.stop()
 
         elif state == "CP3_FACE_STRAIGHTAWAY":
