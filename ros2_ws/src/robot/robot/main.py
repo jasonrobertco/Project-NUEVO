@@ -83,13 +83,13 @@ RIGHT_ANGLE_TURN_DEG = 80.0
 # behaviorally fixed.
 CHECKPOINT_1_APPROACH_DISTANCE_MM = 2500.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 600.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 1900.0            # length of the bridge/ramp crossing
+BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
 # it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
 # 610 mm course grid (COURSE_TILE_MM). Previously written as TILE_MM * 1.5 with
 # TILE_MM = 300, which read like "1.5 tiles" but was always 450 mm; renamed to a
 # literal so it can't be confused with the course grid.
-BRIDGE_EXIT_DISTANCE_MM = 900.0
+BRIDGE_EXIT_DISTANCE_MM = 600.0
 
 # Checkpoint 2 and later obstacle-avoidance course sections.
 # The UI/course grid uses 610 mm cells (see WorldCanvas.tsx / vm_demo.py).
@@ -233,6 +233,61 @@ FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading
 # wall onto the finish straightaway. Set both on the venue.
 CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # turn to face the re-zero wall (SIGN UNVERIFIED; magnitude calibrated)
 CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish straightaway (SIGN UNVERIFIED; magnitude calibrated)
+
+# ---------------------------------------------------------------------------
+# Checkpoint 3 deterministic 3-cone slalom (replaces the reactive-LAPF cp2->cp3
+# approach when SLALOM_ENABLED). The cp3 section has exactly 3 cones across the
+# lane (right/left/right); the robot weaves through the open gap on each
+# (pass left/right/left), then hands off to the EXISTING wall-square -> finish
+# maneuver once past cone 3. Cone positions come from live LiDAR (field entry
+# varies >1 m run-to-run, so hardcoded waypoints don't survive).
+#
+# Method (per the approved plan): narrow the LiDAR to a forward lane window so
+# the tracker isn't saturated by walls/bridge (Layer A), then in the FSM accept
+# only cone-sized, isolated, persistent tracks in a lane window ahead (Layer B);
+# sequentially identify cone i, pure-pursuit a gate offset to the OPEN side
+# (auto-chosen from the cone's measured lateral sign, R/L/R pattern as fallback),
+# mark it passed by along-axis progress, repeat, then exit to the wall maneuver.
+# On any cone-ID failure (count != 3, none found, ambiguous) -> safe-stop, and
+# the LiDAR filter is restored. ALL values below NEED FIELD TUNING; the first
+# run prints a per-candidate dump (S/D/ahead/r) so they can be dialed in.
+#
+# DECISIONS BAKED IN (correct after the test): pure-pursuit gates; sequential
+# per-cone detection; Layer-A narrowing with the slalom carrying its own ceiling
+# (no LAPF reverse during slalom; full filter restored at handoff); safe-stop on
+# failure; open side auto-detected with R/L/R fallback. Set SLALOM_ENABLED=False
+# to fall back to the reactive LAPF approach + wall finish.
+SLALOM_ENABLED = True
+SLALOM_SPEED_MM_S = 120.0              # pursuit/creep speed during the slalom (slower than 140 cruise)
+# Layer A — source-level lane window applied to the LiDAR during the slalom only,
+# restored to the full configured filter at handoff / on any exit. Narrowing the
+# FOV forward blinds the rear sector, so the slalom does NOT use LAPF reverse
+# recovery (it has its own ceiling); the cp3->cp4 LAPF leg runs with full FOV.
+CONE_FOV_HALF_DEG = 40.0               # forward FOV half-window (+/- deg) during slalom
+CONE_RANGE_MAX_MM = 2500.0             # max LiDAR range during slalom (drop far walls/bridge)
+# Layer B — cone identification filter (on confirmed tracks, in the approach-axis
+# frame: S = forward from cp2 start, D = lateral, +left).
+CONE_LANE_HALF_WIDTH_MM = 900.0        # |D| window. GENEROUS on purpose: lateral entry varies ~1 m
+                                       # run-to-run, so a tight window would miss a cone. Tune DOWN
+                                       # from the first-run dump if walls intrude.
+CONE_DETECT_MAX_AHEAD_MM = 1500.0      # only look this far ahead for the next cone (~2.5 tiles)
+CONE_MIN_RADIUS_MM = 20.0              # cone-size gate low (reject specks)
+CONE_MAX_RADIUS_MM = 90.0              # cone-size gate high (just above the 75 mm tracker clamp)
+CONE_ISOLATION_MIN_MM = 300.0          # a cone has NO other track within this (rejects wall segments)
+CONE_CONFIRM_FRAMES = 3                # consecutive frames a candidate must persist before accepted
+CONE_ASSOC_MM = 200.0                  # frame-to-frame match radius for the persistence counter
+CONE_SIDE_MIN_D_MM = 80.0              # |D| below this is too central to read a side -> use pattern
+CONE_PASS_SIDES = (1, -1, 1)           # fallback open side per cone: R/L/R -> pass L/R/L (+1 = left)
+# Weave / gate geometry.
+CONE_PASS_CLEARANCE_MM = 375.0         # lateral gate offset to the open side (cone r + half robot + margin)
+CONE_GATE_FORWARD_MM = 250.0           # push the gate this far PAST the cone so pursuit flows through
+CONE_PASSED_MARGIN_MM = 150.0          # along-axis margin past the cone to call it passed
+# Slalom guards / motion.
+CONE_SCAN_MAX_ADVANCE_MM = 1100.0      # per-cone: fail if we advance this far in SCAN without a cone
+CONE_GATE_TIMEOUT_S = 8.0              # per-cone: fail if a gate isn't cleared within this
+CONE_EXIT_ADVANCE_MM = 300.0           # settle distance past cone 3 before the wall maneuver
+SLALOM_SCAN_LOOKAHEAD_MM = 1600.0      # straight-ahead pursuit target distance while scanning
+SLALOM_SEGMENT_CEILING_S = 35.0        # global anti-hang for the whole slalom
 
 StepKind = Literal["move_to", "turn_by", "move_forward"]
 
@@ -487,6 +542,172 @@ def start_cp3_terminal_maneuver(robot: Robot):
     )
 
 
+# ===========================================================================
+# Checkpoint 3 deterministic 3-cone slalom helpers
+# ===========================================================================
+
+def narrow_lidar_for_slalom(robot: Robot) -> None:
+    """Layer A: restrict the LiDAR to a forward lane window so the tracker isn't
+    saturated by walls/bridge. Restored via restore_lidar_full() at handoff."""
+    robot.set_lidar_filter(
+        range_max_mm=CONE_RANGE_MAX_MM,
+        fov_deg=(-CONE_FOV_HALF_DEG, CONE_FOV_HALF_DEG),
+    )
+
+
+def restore_lidar_full(robot: Robot) -> None:
+    """Restore the full configured LiDAR filter (undo narrow_lidar_for_slalom)."""
+    robot.set_lidar_filter(
+        range_min_mm=LIDAR_RANGE_MIN_MM,
+        range_max_mm=LIDAR_RANGE_MAX_MM,
+        fov_deg=LIDAR_FOV_DEG,
+    )
+
+
+def project_onto_axis(x_mm: float, y_mm: float, sl: dict) -> tuple[float, float]:
+    """Return (S, D) of a world point in the approach-axis frame: S = forward
+    along the slalom heading from the cp2 start, D = lateral (+left)."""
+    dx = x_mm - sl["start_mm"][0]
+    dy = y_mm - sl["start_mm"][1]
+    heading = sl["heading_rad"]
+    s = dx * math.cos(heading) + dy * math.sin(heading)
+    d = -dx * math.sin(heading) + dy * math.cos(heading)
+    return s, d
+
+
+def robot_axis_sd(robot: Robot, sl: dict) -> tuple[float, float]:
+    """(S, D) of the robot itself in the approach-axis frame."""
+    x_mm, y_mm, _ = robot.get_pose()
+    return project_onto_axis(x_mm, y_mm, sl)
+
+
+def cone_candidates(robot: Robot, sl: dict) -> list[dict]:
+    """Confirmed tracks that look like real cones ahead in the lane window.
+
+    Layer B filter: cone-sized radius, inside the lateral lane window, ahead of
+    the robot within the search distance, and ISOLATED (no other track within
+    CONE_ISOLATION_MIN_MM — rejects wall/bridge segments, which cluster). Returned
+    sorted nearest-ahead first. Each entry: {x, y, r, S, D, ahead}.
+    """
+    tracks = robot.get_obstacle_tracks()
+    s_robot, _ = robot_axis_sd(robot, sl)
+    candidates: list[dict] = []
+    for track in tracks:
+        tx, ty, tr = float(track["x"]), float(track["y"]), float(track["radius"])
+        if not (CONE_MIN_RADIUS_MM <= tr <= CONE_MAX_RADIUS_MM):
+            continue
+        s, d = project_onto_axis(tx, ty, sl)
+        if abs(d) > CONE_LANE_HALF_WIDTH_MM:
+            continue
+        ahead = s - s_robot
+        if ahead <= 0.0 or ahead > CONE_DETECT_MAX_AHEAD_MM:
+            continue
+        isolated = True
+        for other in tracks:
+            if int(other["id"]) == int(track["id"]):
+                continue
+            if math.hypot(float(other["x"]) - tx, float(other["y"]) - ty) < CONE_ISOLATION_MIN_MM:
+                isolated = False
+                break
+        if not isolated:
+            continue
+        candidates.append({"x": tx, "y": ty, "r": tr, "S": s, "D": d, "ahead": ahead})
+    candidates.sort(key=lambda c: c["ahead"])
+    return candidates
+
+
+def cone_candidate_summary(robot: Robot, sl: dict) -> str:
+    """One-line dump of cone candidates vs. raw track count (first-run tuning)."""
+    candidates = cone_candidates(robot, sl)
+    raw = len(robot.get_obstacle_tracks())
+    if not candidates:
+        return f"cones: none in window ({raw} raw tracks)"
+    parts = [
+        f"[S={c['S']:5.0f} D={c['D']:5.0f} ahead={c['ahead']:5.0f} r={c['r']:3.0f}]"
+        for c in candidates
+    ]
+    return f"cones {len(candidates)}/{raw}: " + " ".join(parts)
+
+
+def cone_open_side_sign(sl: dict, cone: dict) -> int:
+    """+1 = pass on the lane's LEFT, -1 = right. Auto from the cone's measured
+    lateral sign (pass opposite the side it sits on); fall back to the known
+    R/L/R pattern when the cone is too central to read a side confidently."""
+    d = cone["D"]
+    if abs(d) >= CONE_SIDE_MIN_D_MM:
+        return -1 if d > 0.0 else 1
+    idx = sl["cone_index"] - 1
+    return CONE_PASS_SIDES[idx] if 0 <= idx < len(CONE_PASS_SIDES) else 1
+
+
+def begin_slalom(robot: Robot, sl: dict, now: float) -> None:
+    """Initialize slalom context at cp2 and narrow the LiDAR to the lane window."""
+    x_mm, y_mm, theta_deg = robot.get_pose()
+    sl.clear()
+    sl.update(
+        {
+            "start_mm": (x_mm, y_mm),
+            "heading_rad": math.radians(theta_deg),
+            "cone_index": 1,
+            "started_at": now,
+            "scan_started_s": 0.0,
+            "candidate": None,
+            "candidate_count": 0,
+            "current_cone_s": 0.0,
+            "gate_started_at": now,
+        }
+    )
+    narrow_lidar_for_slalom(robot)
+
+
+def start_scan(robot: Robot, sl: dict, now: float):
+    """(Re)start the SCAN phase for the current cone: creep straight along the
+    approach axis while looking for the next cone. Returns the motion handle."""
+    s_robot, _ = robot_axis_sd(robot, sl)
+    sl["scan_started_s"] = s_robot
+    sl["candidate"] = None
+    sl["candidate_count"] = 0
+    heading = sl["heading_rad"]
+    target = s_robot + SLALOM_SCAN_LOOKAHEAD_MM
+    tx = sl["start_mm"][0] + math.cos(heading) * target
+    ty = sl["start_mm"][1] + math.sin(heading) * target
+    print(f"[FSM] cp3 slalom - scanning for cone {sl['cone_index']}/3 (advance {s_robot:.0f} mm)")
+    return robot.move_to(tx, ty, velocity=SLALOM_SPEED_MM_S, tolerance=DRIVE_TOLERANCE_MM, blocking=False)
+
+
+def start_gate(robot: Robot, sl: dict, cone: dict, now: float):
+    """Begin pure-pursuit to the gate beside+past the identified cone, offset to
+    the open side. Returns the motion handle."""
+    sign = cone_open_side_sign(sl, cone)
+    heading = sl["heading_rad"]
+    perp = heading + sign * (math.pi / 2.0)
+    gate_x = cone["x"] + math.cos(heading) * CONE_GATE_FORWARD_MM + math.cos(perp) * CONE_PASS_CLEARANCE_MM
+    gate_y = cone["y"] + math.sin(heading) * CONE_GATE_FORWARD_MM + math.sin(perp) * CONE_PASS_CLEARANCE_MM
+    sl["current_cone_s"] = cone["S"]
+    sl["gate_started_at"] = now
+    side = "left" if sign > 0 else "right"
+    print(
+        f"[FSM] cp3 slalom - cone {sl['cone_index']}/3 at S={cone['S']:.0f} D={cone['D']:.0f} "
+        f"r={cone['r']:.0f} mm - passing {side}, gate=({gate_x:.0f}, {gate_y:.0f})"
+    )
+    return robot.move_to(gate_x, gate_y, velocity=SLALOM_SPEED_MM_S, tolerance=DRIVE_TOLERANCE_MM, blocking=False)
+
+
+def settle_forward(robot: Robot, sl: dict, s_robot: float):
+    """Issue a short straight settle move CONE_EXIT_ADVANCE_MM further up-axis."""
+    heading = sl["heading_rad"]
+    target = s_robot + CONE_EXIT_ADVANCE_MM
+    tx = sl["start_mm"][0] + math.cos(heading) * target
+    ty = sl["start_mm"][1] + math.sin(heading) * target
+    return robot.move_to(tx, ty, velocity=SLALOM_SPEED_MM_S, tolerance=DRIVE_TOLERANCE_MM, blocking=False)
+
+
+def slalom_fail(robot: Robot, sl: dict, reason: str) -> None:
+    """Restore the LiDAR and safe-stop to IDLE on a slalom failure."""
+    restore_lidar_full(robot)
+    safe_stop_to_idle(robot, reason)
+
+
 def perturbed_goal_mm(
     base_goal_mm: tuple[float, float],
     seg_heading_rad: float,
@@ -739,6 +960,7 @@ def run(robot: Robot) -> None:
     state = "INIT"
     motion_handle = None
     av: dict = {}  # active obstacle-avoidance segment + watchdog context
+    sl: dict = {}  # active cp3 slalom context
     step_index = 0
     last_status_print_at = 0.0
 
@@ -786,6 +1008,14 @@ def run(robot: Robot) -> None:
                 f"front_cone_half={FRONT_CONE_HALF_WIDTH_MM:.0f} mm "
                 f"(turn signs UNVERIFIED)"
             )
+            print(
+                "[CFG] cp3 3-cone slalom: "
+                f"enabled={SLALOM_ENABLED} speed={SLALOM_SPEED_MM_S:.0f} mm/s "
+                f"fov=+/-{CONE_FOV_HALF_DEG:.0f} deg range_max={CONE_RANGE_MAX_MM:.0f} mm "
+                f"lane_half={CONE_LANE_HALF_WIDTH_MM:.0f} mm cone_r=[{CONE_MIN_RADIUS_MM:.0f},{CONE_MAX_RADIUS_MM:.0f}] "
+                f"isolation={CONE_ISOLATION_MIN_MM:.0f} mm clearance={CONE_PASS_CLEARANCE_MM:.0f} mm "
+                "(all UNTUNED)"
+            )
             state = "IDLE"
 
         elif state == "IDLE":
@@ -815,18 +1045,25 @@ def run(robot: Robot) -> None:
                     step_index += 1
                     if step_index >= len(MISSION_STEPS):
                         print_status(robot, len(MISSION_STEPS) - 1)
-                        print("[FSM] CHECKPOINT 2 - starting obstacle avoidance toward checkpoint 3")
-                        motion_handle = begin_avoidance_segment(
-                            robot,
-                            av,
-                            "checkpoint 2 -> checkpoint 3 approach",
-                            CHECKPOINT_3_APPROACH_DISTANCE_MM,
-                            next_state="CP3_FACE_WALL",
-                            now=now,
-                            terminate_on_wall=True,
-                        )
-                        last_status_print_at = now
-                        state = "OBSTACLE_AVOIDANCE"
+                        if SLALOM_ENABLED:
+                            print("[FSM] CHECKPOINT 2 - starting 3-cone slalom toward checkpoint 3")
+                            begin_slalom(robot, sl, now)
+                            motion_handle = start_scan(robot, sl, now)
+                            last_status_print_at = now
+                            state = "CP3_SLALOM_SCAN"
+                        else:
+                            print("[FSM] CHECKPOINT 2 - starting obstacle avoidance toward checkpoint 3")
+                            motion_handle = begin_avoidance_segment(
+                                robot,
+                                av,
+                                "checkpoint 2 -> checkpoint 3 approach",
+                                CHECKPOINT_3_APPROACH_DISTANCE_MM,
+                                next_state="CP3_FACE_WALL",
+                                now=now,
+                                terminate_on_wall=True,
+                            )
+                            last_status_print_at = now
+                            state = "OBSTACLE_AVOIDANCE"
                     else:
                         motion_handle = start_step(robot, MISSION_STEPS[step_index])
                         print(
@@ -992,6 +1229,170 @@ def run(robot: Robot) -> None:
                     motion_handle = reissue_after_recovery(robot, av, now)
                     last_status_print_at = now
                     state = "OBSTACLE_AVOIDANCE"
+
+        elif state == "CP3_SLALOM_SCAN":
+            # Creep forward along the approach axis looking for the next cone.
+            # Accept only a cone-sized, isolated, persistent track in the lane
+            # window ahead; then build its gate and pursue it.
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                restore_lidar_full(robot)
+                show_idle_leds(robot)
+                print("[FSM] IDLE - cp3 slalom cancelled")
+                state = "IDLE"
+            else:
+                s_robot, d_robot = robot_axis_sd(robot, sl)
+                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                    print(
+                        f"  cp3 slalom scan cone {sl['cone_index']}/3 "
+                        f"S={s_robot:6.0f} D={d_robot:6.0f} mm"
+                    )
+                    print("    " + cone_candidate_summary(robot, sl))
+                    last_status_print_at = now
+
+                candidates = cone_candidates(robot, sl)
+                cone = candidates[0] if candidates else None
+                if cone is None:
+                    sl["candidate"] = None
+                    sl["candidate_count"] = 0
+                else:
+                    prev = sl["candidate"]
+                    if prev is not None and math.hypot(cone["x"] - prev[0], cone["y"] - prev[1]) <= CONE_ASSOC_MM:
+                        sl["candidate_count"] += 1
+                    else:
+                        sl["candidate_count"] = 1
+                    sl["candidate"] = (cone["x"], cone["y"])
+
+                if (now - sl["started_at"]) >= SLALOM_SEGMENT_CEILING_S:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    slalom_fail(robot, sl, "cp3 slalom timed out (segment ceiling)")
+                    state = "IDLE"
+                elif cone is not None and sl["candidate_count"] >= CONE_CONFIRM_FRAMES:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = start_gate(robot, sl, cone, now)
+                    last_status_print_at = now
+                    state = "CP3_SLALOM_GATE"
+                elif (s_robot - sl["scan_started_s"]) >= CONE_SCAN_MAX_ADVANCE_MM:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    slalom_fail(
+                        robot,
+                        sl,
+                        f"cp3 slalom - cone {sl['cone_index']}/3 not found within "
+                        f"{CONE_SCAN_MAX_ADVANCE_MM:.0f} mm ({len(candidates)} candidates) - check cone count",
+                    )
+                    state = "IDLE"
+                # else: keep creeping/scanning (motion continues)
+
+        elif state == "CP3_SLALOM_GATE":
+            # Pure-pursuit the gate beside+past the current cone; advance once the
+            # robot is past the cone along the approach axis.
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                restore_lidar_full(robot)
+                show_idle_leds(robot)
+                print("[FSM] IDLE - cp3 slalom cancelled")
+                state = "IDLE"
+            else:
+                s_robot, d_robot = robot_axis_sd(robot, sl)
+                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                    print(
+                        f"  cp3 slalom gate cone {sl['cone_index']}/3 "
+                        f"S={s_robot:6.0f} D={d_robot:6.0f} mm "
+                        f"(cone S={sl['current_cone_s']:.0f})"
+                    )
+                    last_status_print_at = now
+
+                passed = s_robot >= sl["current_cone_s"] + CONE_PASSED_MARGIN_MM
+                gate_done = passed or (motion_handle is not None and motion_handle.is_finished())
+                if (now - sl["started_at"]) >= SLALOM_SEGMENT_CEILING_S:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    slalom_fail(robot, sl, "cp3 slalom timed out (segment ceiling)")
+                    state = "IDLE"
+                elif gate_done:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    print(f"[FSM] cp3 slalom - cone {sl['cone_index']}/3 passed (advance {s_robot:.0f} mm)")
+                    sl["cone_index"] += 1
+                    if sl["cone_index"] > 3:
+                        print("[FSM] cp3 slalom - all 3 cones passed - settling into finish lane")
+                        motion_handle = settle_forward(robot, sl, s_robot)
+                        last_status_print_at = now
+                        state = "CP3_SLALOM_EXIT"
+                    else:
+                        motion_handle = start_scan(robot, sl, now)
+                        last_status_print_at = now
+                        state = "CP3_SLALOM_SCAN"
+                elif (now - sl["gate_started_at"]) >= CONE_GATE_TIMEOUT_S:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    slalom_fail(
+                        robot,
+                        sl,
+                        f"cp3 slalom - cone {sl['cone_index']}/3 gate not cleared in "
+                        f"{CONE_GATE_TIMEOUT_S:.0f} s",
+                    )
+                    state = "IDLE"
+                # else: keep pursuing the gate
+
+        elif state == "CP3_SLALOM_EXIT":
+            # Past cone 3: settle forward, confirm no more cones ahead and the
+            # advance floor is met, restore the LiDAR, and hand to the existing
+            # wall-square -> finish maneuver.
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                restore_lidar_full(robot)
+                show_idle_leds(robot)
+                print("[FSM] IDLE - cp3 slalom cancelled")
+                state = "IDLE"
+            else:
+                s_robot, d_robot = robot_axis_sd(robot, sl)
+                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                    print(
+                        f"  cp3 slalom exit S={s_robot:6.0f} D={d_robot:6.0f} mm"
+                    )
+                    print("    " + cone_candidate_summary(robot, sl))
+                    last_status_print_at = now
+
+                if (now - sl["started_at"]) >= SLALOM_SEGMENT_CEILING_S:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    slalom_fail(robot, sl, "cp3 slalom timed out (segment ceiling)")
+                    state = "IDLE"
+                elif motion_handle is None or motion_handle.is_finished():
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    remaining_cones = cone_candidates(robot, sl)
+                    if remaining_cones:
+                        slalom_fail(
+                            robot,
+                            sl,
+                            f"cp3 slalom - unexpected cone still ahead after 3 passes "
+                            f"({len(remaining_cones)} in window) - check cone count",
+                        )
+                        state = "IDLE"
+                    elif s_robot < CHECKPOINT_3_MIN_ADVANCE_MM:
+                        # Belt-and-suspenders advance floor not yet met: settle more.
+                        print(
+                            f"[FSM] cp3 slalom exit - advance {s_robot:.0f} mm "
+                            f"< min {CHECKPOINT_3_MIN_ADVANCE_MM:.0f} mm - settling further"
+                        )
+                        motion_handle = settle_forward(robot, sl, s_robot)
+                        last_status_print_at = now
+                    else:
+                        restore_lidar_full(robot)
+                        print(
+                            f"[FSM] cp3 slalom complete (advance {s_robot:.0f} mm, lane clear) "
+                            "- handing off to wall-referenced finish"
+                        )
+                        motion_handle = start_cp3_terminal_maneuver(robot)
+                        last_status_print_at = now
+                        state = "CP3_FACE_WALL"
 
         elif state == "CP3_FACE_WALL":
             # Square up to the outer course wall (turn started on entry).
