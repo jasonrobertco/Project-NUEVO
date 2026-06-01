@@ -95,27 +95,26 @@ BRIDGE_EXIT_DISTANCE_MM = 600.0
 # The bridge is crossed open-loop on odometry over a long distance, so any
 # heading error left by the two preceding 90-degree turns becomes a large
 # lateral deviation (deviation ~= BRIDGE_CROSS_DISTANCE_MM * sin(theta_err)).
-# Right after the 2nd turn the LiDAR sees a wall to the LEFT (parallel to the
-# crossing) and a wall BEHIND (perpendicular). We fit a line to each and turn
-# to null the heading error before committing to the crossing. This corrects
-# HEADING only, not lateral offset.
+# Right after the 2nd turn the LiDAR sees both SIDE walls of the bridge lane,
+# each running parallel to the crossing. We fit a line to each side and turn to
+# null the heading error (the side walls' tilt off the robot's forward axis)
+# before committing to the crossing. The wall standoff is auto-detected per
+# side, so no measured distance is needed. This corrects HEADING only, not
+# lateral offset.
 #
-# FIELD TUNING REQUIRED. The two wall standoffs below MUST be measured at the
-# bridge mouth on the venue, and the correction SIGN is UNVERIFIED (same
-# caveat as the scripted turns) — bench-test the direction before trusting it
-# on the bridge. The correction is deliberately conservative: it does NOTHING
-# (no turn) whenever the scan is ambiguous, so a noisy read cannot make the
-# crossing worse.
+# The correction SIGN is UNVERIFIED (same caveat as the scripted turns) —
+# bench-test the direction before trusting it on the bridge. The correction is
+# deliberately conservative: it does NOTHING (no turn) whenever the scan is
+# ambiguous (no usable side wall, left/right disagree, or fit too large), so a
+# noisy read cannot make the crossing worse.
 BRIDGE_SQUARE_ENABLED = True
 BRIDGE_SQUARE_DEBUG = True                 # dump the per-sector scan at square-up (tuning aid)
-BRIDGE_LEFT_WALL_DIST_MM = 200.0          # expected perpendicular distance to the left wall
-BRIDGE_REAR_WALL_DIST_MM = 500.0          # expected distance to the wall behind
-BRIDGE_WALL_BAND_MM = 250.0               # keep points within +/- this of the expected standoff
-BRIDGE_WALL_SAMPLE_DEPTH_MM = 800.0       # along-wall window of points to fit
+BRIDGE_WALL_BAND_MM = 250.0               # keep points within +/- this of the auto-detected standoff
+BRIDGE_WALL_SAMPLE_DEPTH_MM = 1200.0      # along-wall window of points to fit (|x| <= this)
 BRIDGE_SQUARE_MIN_POINTS = 8              # minimum inliers to trust a line fit
 BRIDGE_SQUARE_DEADBAND_DEG = 1.5          # below this error, don't bother turning
 BRIDGE_SQUARE_MAX_CORRECTION_DEG = 15.0   # refuse larger corrections (guards a bad fit)
-BRIDGE_SQUARE_CROSSCHECK_DEG = 6.0        # left vs rear estimates must agree within this
+BRIDGE_SQUARE_CROSSCHECK_DEG = 6.0        # left vs right estimates must agree within this
 
 # Checkpoint 2 and later obstacle-avoidance course sections.
 # The UI/course grid uses 610 mm cells (see WorldCanvas.tsx / vm_demo.py).
@@ -245,8 +244,8 @@ WALL_ARM_REMAINING_MM = 1200.0         # only arm wall-detection within this muc
 # prints the exact measured advance, so dial this in from one run rather than
 # guessing (set it to the logged fire advance + ~300, or wherever the turn should
 # actually start).
-CHECKPOINT_3_MIN_ADVANCE_MM = 2150.0
-WALL_APPROACH_TARGET_MM = 250.0        # stop this far from the wall (the re-zero)
+CHECKPOINT_3_MIN_ADVANCE_MM = 2100.0
+WALL_APPROACH_TARGET_MM = 350.0        # stop this far from the wall (the re-zero)
 WALL_APPROACH_SPEED_MM_S = 80.0        # slow closed-loop approach speed
 WALL_APPROACH_TIMEOUT_S = 8.0          # watchdog for the approach drive (not under LAPF watchdog)
 # The standoff the turn actually fires at is variable run-to-run: the creep only
@@ -623,16 +622,47 @@ def _log_wall_diagnostics(cloud: list[tuple[float, float]]) -> None:
               f"nearest={nearest:6.0f} mm  fit_angle={angle_s} deg")
 
 
+def _side_wall_error_deg(cloud: list[tuple[float, float]], side: int) -> float | None:
+    """Heading error (deg) from one side wall, which runs parallel to travel.
+
+    side = +1 selects the left wall (+y), -1 the right wall (-y). Points are
+    taken in a 45-deg wedge toward that side (|x| <= |y|, so a wall must be more
+    lateral than forward to count — this isolates the side wall from the
+    front/rear walls). The wall standoff is auto-detected as the median lateral
+    offset, then only the dominant slab within +/- BRIDGE_WALL_BAND_MM is fit,
+    rejecting corner leakage at other distances.
+
+    A parallel wall fits to ~0 deg when the robot is squared, so the fit angle
+    IS the heading error. Returns None if there aren't enough clean points.
+    """
+    cand = [
+        (x, y) for (x, y) in cloud
+        if (y > 0.0 if side > 0 else y < 0.0)
+        and abs(x) <= abs(y)
+        and abs(x) <= BRIDGE_WALL_SAMPLE_DEPTH_MM
+    ]
+    if len(cand) < BRIDGE_SQUARE_MIN_POINTS:
+        return None
+    lateral = sorted(abs(y) for _, y in cand)
+    wall_d = lateral[len(lateral) // 2]  # median standoff = the dominant wall
+    pts = [(x, y) for (x, y) in cand if abs(abs(y) - wall_d) <= BRIDGE_WALL_BAND_MM]
+    if len(pts) < BRIDGE_SQUARE_MIN_POINTS:
+        return None
+    return _fit_line_angle_deg(pts)
+
+
 def estimate_bridge_heading_error_deg(robot: Robot) -> float:
-    """Heading error (deg) at the bridge mouth, measured against the walls.
+    """Heading error (deg) at the bridge mouth, measured against the side walls.
 
-    A positive result means the robot is rotated such that turn_by(-error)
-    squares it up onto the bridge axis (SIGN UNVERIFIED — confirm on the
-    venue). Uses the LEFT wall (parallel to travel) as the primary reference
-    and the REAR wall (perpendicular) as an independent cross-check.
+    A positive result means turn_by(-error) squares the robot onto the bridge
+    axis (SIGN UNVERIFIED — confirm on the venue). The two side walls run
+    parallel to travel and are independent references: each fits to ~0 deg when
+    squared, so each fit angle is a heading-error estimate. When both are
+    visible they must agree (cross-check) and are averaged; when only one is
+    visible it is used alone.
 
-    Returns 0.0 (caller should not turn) whenever the read is ambiguous: too
-    few wall points, an implausibly large fit, or the two walls disagreeing.
+    Returns 0.0 (caller should not turn) whenever the read is ambiguous: no
+    usable side wall, the two walls disagreeing, or an implausibly large fit.
     Corrects HEADING only; lateral offset in the lane is not observed here.
     """
     if not BRIDGE_SQUARE_ENABLED:
@@ -643,45 +673,26 @@ def estimate_bridge_heading_error_deg(robot: Robot) -> float:
     if BRIDGE_SQUARE_DEBUG:
         _log_wall_diagnostics(cloud)
 
-    # Left wall: points off the +y side, near the expected standoff, within a
-    # forward/back window so we fit the local segment beside the robot.
-    left_pts = [
-        (x, y) for (x, y) in cloud
-        if y > 0.0
-        and abs(y - BRIDGE_LEFT_WALL_DIST_MM) <= BRIDGE_WALL_BAND_MM
-        and abs(x) <= BRIDGE_WALL_SAMPLE_DEPTH_MM
-    ]
-    if len(left_pts) < BRIDGE_SQUARE_MIN_POINTS:
-        print(f"[bridge-square] left wall: {len(left_pts)} pts "
-              f"(<{BRIDGE_SQUARE_MIN_POINTS}); skipping correction")
+    left_err = _side_wall_error_deg(cloud, +1)
+    right_err = _side_wall_error_deg(cloud, -1)
+    estimates = [(name, e) for name, e in (("left", left_err), ("right", right_err))
+                 if e is not None]
+    if not estimates:
+        print(f"[bridge-square] no usable side wall (<{BRIDGE_SQUARE_MIN_POINTS} pts "
+              "either side); skipping correction")
         return 0.0
 
-    left_angle = _fit_line_angle_deg(left_pts)
-    if left_angle is None:
-        print("[bridge-square] left wall fit degenerate; skipping correction")
-        return 0.0
-    # Left wall runs parallel to travel: its principal axis ~= robot +x when
-    # squared, so the line's tilt off 0 deg IS the heading error.
-    error_deg = left_angle
-
-    # Rear wall cross-check (perpendicular to travel: principal axis ~= +/-90
-    # deg when squared, so deviation from 90 is the heading error).
-    rear_pts = [
-        (x, y) for (x, y) in cloud
-        if x < 0.0
-        and abs(abs(x) - BRIDGE_REAR_WALL_DIST_MM) <= BRIDGE_WALL_BAND_MM
-        and abs(y) <= BRIDGE_WALL_SAMPLE_DEPTH_MM
-    ]
-    if len(rear_pts) >= BRIDGE_SQUARE_MIN_POINTS:
-        rear_angle = _fit_line_angle_deg(rear_pts)
-        if rear_angle is not None:
-            rear_error = rear_angle - 90.0 if rear_angle >= 0.0 else rear_angle + 90.0
-            if abs(error_deg - rear_error) > BRIDGE_SQUARE_CROSSCHECK_DEG:
-                print(f"[bridge-square] left ({error_deg:+.1f}) and rear "
-                      f"({rear_error:+.1f}) disagree > {BRIDGE_SQUARE_CROSSCHECK_DEG}; "
-                      "skipping correction")
-                return 0.0
-            error_deg = 0.5 * (error_deg + rear_error)  # steadier averaged estimate
+    if len(estimates) == 2:
+        if abs(left_err - right_err) > BRIDGE_SQUARE_CROSSCHECK_DEG:
+            print(f"[bridge-square] left ({left_err:+.1f}) and right ({right_err:+.1f}) "
+                  f"disagree > {BRIDGE_SQUARE_CROSSCHECK_DEG}; skipping correction")
+            return 0.0
+        error_deg = 0.5 * (left_err + right_err)
+        print(f"[bridge-square] left={left_err:+.1f} right={right_err:+.1f} "
+              f"-> error {error_deg:+.1f} deg")
+    else:
+        name, error_deg = estimates[0]
+        print(f"[bridge-square] only {name} wall visible -> error {error_deg:+.1f} deg")
 
     if abs(error_deg) > BRIDGE_SQUARE_MAX_CORRECTION_DEG:
         print(f"[bridge-square] correction {error_deg:+.1f} deg exceeds clamp "
@@ -811,28 +822,32 @@ def cone_candidate_summary(robot: Robot, sl: dict) -> str:
     return f"cones {len(candidates)}/{raw}: " + " ".join(parts)
 
 
-def cone_open_side_sign(sl: dict, cone: dict) -> int:
+def cone_open_side_sign(sl: dict, cone: dict, d_robot: float) -> int:
     """+1 = pass on the lane's LEFT, -1 = right.
 
-    The known physical R/L/R cone pattern (CONE_PASS_SIDES) is the PRIMARY source.
-    The approach-axis D=0 is the robot's ENTRY point, which drifts >1 m run-to-run,
-    so the measured lateral sign misreads which side a cone is really on (a left
-    cone can read as right). We therefore trust the pattern and only use the
-    measured sign to flag a disagreement (bad detection, or a wrong pattern), not
-    to override.
+    Pass on the side the robot is ALREADY on relative to the cone — i.e. never
+    cross the cone's lateral line. This (a) physically cannot clip the cone, (b)
+    keeps the lateral excursion small (stays in the lane), and (c) self-corrects
+    to >1 m entry drift, because it compares the LIVE robot and cone lateral
+    positions rather than a fixed frame or a fixed pattern.
+
+    History: trusting the R/L/R CONE_PASS_SIDES pattern as primary forced a
+    FAR-side pass on cone 2 (the pattern said 'right' for a cone already far to
+    the right), which clipped the cone (lateral sep -> 12 mm) and swung the robot
+    ~1.1 m off the lane so it could not find cone 3. The pattern is kept only as a
+    logged reference now; the near-side rule is authoritative.
     """
+    near_sign = 1 if d_robot >= cone["D"] else -1
     idx = sl["cone_index"] - 1
-    pattern_sign = CONE_PASS_SIDES[idx] if 0 <= idx < len(CONE_PASS_SIDES) else 1
-    d = cone["D"]
-    if abs(d) >= CONE_SIDE_MIN_D_MM:
-        measured_sign = -1 if d > 0.0 else 1
-        if measured_sign != pattern_sign:
-            print(
-                f"[warn] cp3 slalom - cone {idx + 1} measured open side "
-                f"({'left' if measured_sign > 0 else 'right'}, D={d:.0f}) disagrees with "
-                f"R/L/R pattern ({'left' if pattern_sign > 0 else 'right'}) - trusting pattern"
-            )
-    return pattern_sign
+    pattern_sign = CONE_PASS_SIDES[idx] if 0 <= idx < len(CONE_PASS_SIDES) else near_sign
+    if near_sign != pattern_sign:
+        print(
+            f"[info] cp3 slalom - cone {idx + 1}: passing "
+            f"{'left' if near_sign > 0 else 'right'} (near side; robot D={d_robot:.0f}, "
+            f"cone D={cone['D']:.0f}); R/L/R pattern would say "
+            f"{'left' if pattern_sign > 0 else 'right'}"
+        )
+    return near_sign
 
 
 def begin_slalom(robot: Robot, sl: dict, now: float) -> None:
@@ -873,7 +888,8 @@ def start_scan(robot: Robot, sl: dict, now: float):
 def start_gate(robot: Robot, sl: dict, cone: dict, now: float):
     """Begin pure-pursuit to the gate beside+past the identified cone, offset to
     the open side. Returns the motion handle."""
-    sign = cone_open_side_sign(sl, cone)
+    s_robot, d_robot = robot_axis_sd(robot, sl)
+    sign = cone_open_side_sign(sl, cone, d_robot)
     heading = sl["heading_rad"]
     perp = heading + sign * (math.pi / 2.0)
     gate_x = cone["x"] + math.cos(heading) * CONE_GATE_FORWARD_MM + math.cos(perp) * CONE_PASS_CLEARANCE_MM
@@ -883,7 +899,6 @@ def start_gate(robot: Robot, sl: dict, cone: dict, now: float):
     sl["gate_started_at"] = now
     # Scale the gate timeout to the distance still to cover (gate forward point
     # minus current advance), so wider inter-cone gaps get proportionally more time.
-    s_robot, _ = robot_axis_sd(robot, sl)
     gate_distance = (cone["S"] + CONE_GATE_FORWARD_MM) - s_robot
     sl["gate_timeout_s"] = max(
         CONE_GATE_TIMEOUT_FLOOR_S,
