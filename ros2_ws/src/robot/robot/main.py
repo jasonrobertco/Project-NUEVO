@@ -71,9 +71,9 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # physical bridge/ramp, not derived from the course grid. Do not change them
 # without re-tuning on the venue — the cp1/2 sequence is meant to stay
 # behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 3350.0   # start -> checkpoint 1 approach point
-BRIDGE_ALIGN_DISTANCE_MM = 150.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 3250.0   # start -> checkpoint 1 approach point
+BRIDGE_ALIGN_DISTANCE_MM = 350.0             # short nudge into the bridge lane
+BRIDGE_CROSS_DISTANCE_MM = 2300.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
 # it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
 # 610 mm course grid (COURSE_TILE_MM). Previously written as TILE_MM * 1.5 with
@@ -549,6 +549,39 @@ def print_status(robot: Robot, step_index: int) -> None:
     )
 
 
+def nearest_obstacle_summary(robot: Robot, count: int = 6) -> str:
+    """Robot-frame dump of the nearest tracked obstacles (the ones the LAPF
+    planner actually uses). Each is reported as fwd/left/edge distances so we can
+    tell a genuinely blocked route (disks clustered straight ahead) from a field
+    polluted by walls/the bridge/the arm (disks beside and behind the robot).
+
+    fwd>0 ahead, fwd<0 behind; left>0 to the robot's left; edge = clearance from
+    robot center to the disk surface.
+    """
+    x, y, theta_deg = robot.get_pose()
+    theta = math.radians(theta_deg)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+    ranked = []
+    for track in robot.get_obstacle_tracks():
+        dx = float(track["x"]) - x
+        dy = float(track["y"]) - y
+        radius = float(track["radius"])
+        fwd = dx * cos_t + dy * sin_t
+        left = -dx * sin_t + dy * cos_t
+        edge = math.hypot(dx, dy) - radius
+        ranked.append((edge, fwd, left, radius))
+
+    ranked.sort(key=lambda item: item[0])
+    if not ranked:
+        return "obstacles: none"
+    parts = [
+        f"[fwd={fwd:5.0f} left={left:5.0f} edge={edge:4.0f} r={radius:3.0f}]"
+        for edge, fwd, left, radius in ranked[:count]
+    ]
+    return f"nearest {min(count, len(ranked))}/{len(ranked)} obstacles: " + " ".join(parts)
+
+
 def print_obstacle_avoidance_status(robot: Robot, goal_mm: tuple[float, float] | None) -> None:
     x, y, theta = robot.get_pose()
     virtual_target = robot.get_virtual_target()
@@ -569,6 +602,7 @@ def print_obstacle_avoidance_status(robot: Robot, goal_mm: tuple[float, float] |
         f"theta={theta:5.1f} deg {remaining_summary} "
         f"{vt_summary} tracked={len(obstacle_tracks)}"
     )
+    print("    " + nearest_obstacle_summary(robot, getattr(robot, "LAPF_MAX_PLANNER_TRACKS", 6)))
 
 
 def run(robot: Robot) -> None:
