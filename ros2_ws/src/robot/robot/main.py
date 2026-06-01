@@ -69,19 +69,27 @@ DRIVE_TOLERANCE_MM = 60.0
 TURN_TOLERANCE_DEG = 3.0
 STATUS_PRINT_INTERVAL_S = 0.5
 
+# Commanded magnitude for a physical 90-degree turn. The robot overshoots a
+# raw 90.0 command by ~10 deg, so the calibrated command is reduced to land on
+# a true right angle. Tune this on the venue: if the robot still turns too far,
+# lower it; if it falls short, raise it. All scripted right-angle turns
+# (cp1/2 sequence and the cp3 terminal turns) reference this so there is one
+# knob to adjust.
+RIGHT_ANGLE_TURN_DEG = 80.0
+
 # Checkpoint 1/2 scripted distances. These are EMPIRICALLY HAND-TUNED on the
 # physical bridge/ramp, not derived from the course grid. Do not change them
 # without re-tuning on the venue — the cp1/2 sequence is meant to stay
 # behaviorally fixed.
 CHECKPOINT_1_APPROACH_DISTANCE_MM = 2500.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 600.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 2300.0            # length of the bridge/ramp crossing
+BRIDGE_CROSS_DISTANCE_MM = 1900.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
 # it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
 # 610 mm course grid (COURSE_TILE_MM). Previously written as TILE_MM * 1.5 with
 # TILE_MM = 300, which read like "1.5 tiles" but was always 450 mm; renamed to a
 # literal so it can't be confused with the course grid.
-BRIDGE_EXIT_DISTANCE_MM = 450.0
+BRIDGE_EXIT_DISTANCE_MM = 900.0
 
 # Checkpoint 2 and later obstacle-avoidance course sections.
 # The UI/course grid uses 610 mm cells (see WorldCanvas.tsx / vm_demo.py).
@@ -223,8 +231,8 @@ FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading
 # may be ~0 (already squared up); if the re-zero wall is the perpendicular
 # finish-side wall, it's ~90. CP3_FACE_STRAIGHTAWAY then turns from facing the
 # wall onto the finish straightaway. Set both on the venue.
-CP3_FACE_WALL_TURN_DEG = 90.0          # turn to face the re-zero wall (SIGN+MAGNITUDE UNVERIFIED)
-CP3_FACE_STRAIGHTAWAY_TURN_DEG = 90.0  # turn onto the finish straightaway (SIGN+MAGNITUDE UNVERIFIED)
+CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # turn to face the re-zero wall (SIGN UNVERIFIED; magnitude calibrated)
+CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish straightaway (SIGN UNVERIFIED; magnitude calibrated)
 
 StepKind = Literal["move_to", "turn_by", "move_forward"]
 
@@ -238,15 +246,15 @@ class MissionStep:
 
 MISSION_STEPS: tuple[MissionStep, ...] = (
     MissionStep("drive to checkpoint 1 approach", "move_forward", CHECKPOINT_1_APPROACH_DISTANCE_MM),
-    MissionStep("turn right toward bridge lane", "turn_by", 90.0),
+    MissionStep("turn right toward bridge lane", "turn_by", RIGHT_ANGLE_TURN_DEG),
     MissionStep("drive into bridge lane", "move_forward", BRIDGE_ALIGN_DISTANCE_MM),
-    MissionStep("turn right to face bridge", "turn_by", 90.0),
+    MissionStep("turn right to face bridge", "turn_by", RIGHT_ANGLE_TURN_DEG),
 
     # Checkpoint 1 reached here.
     MissionStep("cross bridge", "move_forward", BRIDGE_CROSS_DISTANCE_MM),
-    MissionStep("turn left after bridge", "turn_by", -90.0),
+    MissionStep("turn left after bridge", "turn_by", -RIGHT_ANGLE_TURN_DEG),
     MissionStep("drive past bridge exit toward obstacle section", "move_forward", BRIDGE_EXIT_DISTANCE_MM),
-    MissionStep("turn left toward obstacle course", "turn_by", -90.0),
+    MissionStep("turn left toward obstacle course", "turn_by", -RIGHT_ANGLE_TURN_DEG),
 
     # Checkpoint 2 reached here. Robot should be facing the cones/obstacle
     # course. The FSM switches to LAPF obstacle avoidance after this scripted
