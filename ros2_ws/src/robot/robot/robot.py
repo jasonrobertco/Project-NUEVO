@@ -181,6 +181,25 @@ class Robot(HardwareMixin, SensorsMixin, NavigationMixin, LegacyMixin):
     LIDAR_FOV_MIN_DEG:   float = LIDAR_FOV_DEG[0]    # FOV window min (deg, 0° = robot +x forward, CCW+)
     LIDAR_FOV_MAX_DEG:   float = LIDAR_FOV_DEG[1]    # FOV window max
 
+    # Self-footprint exclusion: the 360° lidar sees part of the robot's own
+    # structure (mast / shooter assembly / rear chassis) and the tracker locks
+    # onto it as a phantom obstacle FIXED in the robot frame. The cp2->cp3 run's
+    # obstacle dump showed it at roughly fwd ≈ -220 mm, left ≈ -120 mm
+    # (edge ≈ 190-215 mm, r ≈ 55 mm) on every tick regardless of pose. That
+    # phantom (a) permanently eats one of the LAPF_MAX_PLANNER_TRACKS slots and
+    # (b) sits below the recovery rear-clearance threshold, so reverse recovery
+    # never fires. Any lidar return whose robot-body-frame position falls inside
+    # this box is dropped BEFORE tracking. Box is in the robot body frame:
+    # +x = forward, +y = left (same axes as the `nearest obstacles` dump), so it
+    # can be re-measured directly off that dump on hardware. The box is rear-only
+    # (fwd < 0) so it cannot hide a real obstacle ahead of the robot. Set
+    # ENABLED=False to turn the filter off.
+    SELF_FOOTPRINT_EXCLUSION_ENABLED: bool = True
+    SELF_FOOTPRINT_MIN_FWD_MM:  float = -350.0  # furthest-behind edge of the box (most negative)
+    SELF_FOOTPRINT_MAX_FWD_MM:  float = -100.0  # nearest-to-front edge (kept behind the axle)
+    SELF_FOOTPRINT_MIN_LEFT_MM: float = -250.0  # right edge (+y = left, so min = rightmost)
+    SELF_FOOTPRINT_MAX_LEFT_MM: float =    0.0  # left edge (stops at the body centerline)
+
     OBSTACLE_TRACK_INPUT_RANGE_MM: float = 1200.0
     OBSTACLE_TRACK_MAX_INPUT_POINTS: int = 250
     OBSTACLE_TRACK_CLUSTER_NEIGHBOR_MM: float = 90.0

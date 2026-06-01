@@ -228,6 +228,20 @@ class SensorsMixin:
         rx = rx + mx
         ry = ry + my
 
+        # Step 5b — self-footprint exclusion: drop returns from the robot's own
+        # structure, which the 360° lidar otherwise tracks as a phantom obstacle
+        # fixed in the body frame (see Robot.SELF_FOOTPRINT_* for the box and the
+        # full rationale). rx = forward, ry = left in the robot body frame.
+        if self.SELF_FOOTPRINT_EXCLUSION_ENABLED:
+            inside_self = (
+                (rx >= self.SELF_FOOTPRINT_MIN_FWD_MM)
+                & (rx <= self.SELF_FOOTPRINT_MAX_FWD_MM)
+                & (ry >= self.SELF_FOOTPRINT_MIN_LEFT_MM)
+                & (ry <= self.SELF_FOOTPRINT_MAX_LEFT_MM)
+            )
+            rx = rx[~inside_self]
+            ry = ry[~inside_self]
+
         robot_obstacles = np.float64(
             np.concatenate([rx[:, np.newaxis], ry[:, np.newaxis]], axis=1)
         )

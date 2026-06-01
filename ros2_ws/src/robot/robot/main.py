@@ -14,10 +14,12 @@ to LiDAR/LAPF obstacle avoidance for the later checkpoint sections.
 6. turn left 90 degrees
 7. drive past the bridge exit toward the obstacle section
 8. turn left 90 degrees toward the obstacle course
-9. obstacle-avoid straight 5 course tiles  (LAPF, with watchdog + recovery)
-10. turn right 90 degrees
-11. drive forward 1 course tile
-12. turn right 90 degrees to finish checkpoint 3
+9. obstacle-avoid up the field (LAPF, watchdog + recovery), ending when the
+   outer course wall is detected within standoff ahead
+10. square up to the outer wall and approach it to a fixed standoff (re-zero
+    against an absolute reference instead of a drifted odometry coordinate)
+11. turn onto the checkpoint-3 finish straightaway
+12. verify the straightaway is clear, then drive it -> checkpoint 3 reached
 13. obstacle-avoid straight 5 course tiles to checkpoint 4, then stop (LAPF)
 14. checkpoint 5 manipulator placeholder (scaffold only)
 
@@ -71,9 +73,9 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # physical bridge/ramp, not derived from the course grid. Do not change them
 # without re-tuning on the venue — the cp1/2 sequence is meant to stay
 # behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 3250.0   # start -> checkpoint 1 approach point
-BRIDGE_ALIGN_DISTANCE_MM = 350.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 2300.0            # length of the bridge/ramp crossing
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
+BRIDGE_ALIGN_DISTANCE_MM = 600.0             # short nudge into the bridge lane
+BRIDGE_CROSS_DISTANCE_MM = 2800.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
 # it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
 # 610 mm course grid (COURSE_TILE_MM). Previously written as TILE_MM * 1.5 with
@@ -87,7 +89,6 @@ COURSE_TILE_MM = 610.0
 CHECKPOINT_3_APPROACH_TILES = 5.0
 CHECKPOINT_3_FINAL_STRAIGHT_TILES = 1.0
 CHECKPOINT_4_STRAIGHT_TILES = 5.0
-RIGHT_TURN_DEG = 90.0
 
 CHECKPOINT_3_APPROACH_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_APPROACH_TILES
 CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_FINAL_STRAIGHT_TILES
@@ -173,6 +174,42 @@ REAR_SECTOR_HALF_ANGLE_DEG = 60.0        # +/- around directly-behind
 # finished LAPF handle actually reached the goal (vs the motion thread ending
 # early). Lets us tell success from failure on completion.
 SUCCESS_MARGIN_MM = 20.0
+
+# ---------------------------------------------------------------------------
+# Checkpoint 3 wall-referenced terminal maneuver (Fix #2). Replaces the old
+# blind turn / drive-1-tile / turn hop onto a drift-corrupted goal coordinate.
+# The cp2->cp3 LAPF run now drives up the field until the outer course wall is
+# within WALL_DETECT_STANDOFF_MM ahead, squares up to that wall and creeps to a
+# fixed standoff (re-zeroing against an absolute physical reference), then turns
+# onto the checkpoint-3 finish straightaway and only drives it once the front
+# LiDAR confirms the path is clear. If it can't confirm, it safe-stops to IDLE
+# rather than driving blind.
+#
+# All distances/turns below need FIELD TUNING and several depend on the
+# self-footprint filter (Fix #1) keeping the forward cone phantom-free — verify
+# the `nearest obstacles` dump is clean before trusting front_clearance_mm().
+#
+# IMPORTANT: the two turn SIGNS are UNVERIFIED. turn_by(+deg) = right,
+# turn_by(-deg) = left in this codebase, but which way squares up to the wall
+# and which way faces the finish straightaway must be confirmed PHYSICALLY.
+# Keep BTN_2 ready on the first run.
+WALL_DETECT_STANDOFF_MM = 500.0        # end the LAPF run when the wall is this close ahead
+WALL_ARM_REMAINING_MM = 1200.0         # only arm wall-detection within this much of the goal
+                                       # coordinate, so a CONE in the lower field can't
+                                       # prematurely trigger the terminal maneuver (~2 tiles)
+WALL_APPROACH_TARGET_MM = 250.0        # stop this far from the wall (the re-zero)
+WALL_APPROACH_SPEED_MM_S = 80.0        # slow closed-loop approach speed
+WALL_APPROACH_TIMEOUT_S = 8.0          # watchdog for the approach drive (not under LAPF watchdog)
+CLEAR_PATH_MIN_MM = 1000.0             # straightaway is "clear" if nearest front return is beyond this
+FRONT_CONE_HALF_WIDTH_MM = 150.0       # half-width of the forward cone used to read the wall
+FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading the wall
+# Both turns: SIGN *and* MAGNITUDE need physical verification. If the wall the
+# robot re-zeroes against is the same one detected straight ahead, CP3_FACE_WALL
+# may be ~0 (already squared up); if the re-zero wall is the perpendicular
+# finish-side wall, it's ~90. CP3_FACE_STRAIGHTAWAY then turns from facing the
+# wall onto the finish straightaway. Set both on the venue.
+CP3_FACE_WALL_TURN_DEG = 90.0          # turn to face the re-zero wall (SIGN+MAGNITUDE UNVERIFIED)
+CP3_FACE_STRAIGHTAWAY_TURN_DEG = 90.0  # turn onto the finish straightaway (SIGN+MAGNITUDE UNVERIFIED)
 
 StepKind = Literal["move_to", "turn_by", "move_forward"]
 
@@ -369,6 +406,50 @@ def rear_clearance_mm(robot: Robot) -> float:
     return nearest
 
 
+def front_clearance_mm(
+    robot: Robot,
+    half_width_mm: float = FRONT_CONE_HALF_WIDTH_MM,
+    max_range_mm: float = FRONT_CLEARANCE_MAX_RANGE_MM,
+) -> float:
+    """Nearest forward obstacle distance in a narrow cone straight ahead.
+
+    Reads the live robot-frame lidar cloud (self-footprint already excluded by
+    Fix #1, see Robot.SELF_FOOTPRINT_*). Keeps points ahead of the axle
+    (fwd > 0) within +/- half_width_mm of the centerline and closer than
+    max_range_mm, and returns the smallest forward distance. Returns +inf when
+    nothing is in the cone. Used to detect and approach the outer course wall
+    and to verify the cp3 straightaway is clear. fwd = +x, left = +y in the
+    robot body frame (same axes as the obstacle dump).
+
+    NOTE: uses the raw lidar point cloud, not the tracked disks, so a flat wall
+    reads directly instead of being split into many small tracks. Depends on
+    Fix #1 keeping the forward cone phantom-free.
+    """
+    nearest = math.inf
+    for px, py in robot.get_obstacles():
+        if px <= 0.0 or px > max_range_mm:
+            continue
+        if abs(py) > half_width_mm:
+            continue
+        if px < nearest:
+            nearest = px
+    return nearest
+
+
+def start_cp3_terminal_maneuver(robot: Robot):
+    """Begin the wall-referenced cp3 terminal maneuver: square up to the wall.
+
+    Shared by both entry paths into CP3_FACE_WALL (the wall-detected early
+    termination and the goal-coordinate fallback).
+    """
+    print("[FSM] checkpoint 3 approach done - squaring up to the outer wall")
+    return robot.turn_by(
+        CP3_FACE_WALL_TURN_DEG,
+        tolerance_deg=TURN_TOLERANCE_DEG,
+        blocking=False,
+    )
+
+
 def perturbed_goal_mm(
     base_goal_mm: tuple[float, float],
     seg_heading_rad: float,
@@ -394,8 +475,15 @@ def begin_avoidance_segment(
     distance_mm: float,
     next_state: str,
     now: float,
+    terminate_on_wall: bool = False,
 ):
-    """Start a LAPF segment and (re)initialize its watchdog context in `av`."""
+    """Start a LAPF segment and (re)initialize its watchdog context in `av`.
+
+    terminate_on_wall=True (cp2->cp3 approach) ends the LAPF run as soon as the
+    outer course wall is within WALL_DETECT_STANDOFF_MM ahead, instead of waiting
+    to reach the (drift-corrupted) goal coordinate. The cp3->cp4 segment leaves
+    it False and keeps the goal-coordinate termination.
+    """
     goal_mm = straight_ahead_goal_from_current_pose(robot, distance_mm)
     _, _, theta_deg = robot.get_pose()
     handle = issue_lapf(robot, label, goal_mm)
@@ -408,6 +496,7 @@ def begin_avoidance_segment(
             "seg_heading_rad": math.radians(theta_deg),
             "goal_mm": goal_mm,
             "next_state": next_state,
+            "terminate_on_wall": terminate_on_wall,
             "retry_count": 0,
             "recovery_sign": 1,
             "started_at": now,
@@ -649,6 +738,15 @@ def run(robot: Robot) -> None:
                 f"segment_ceiling={SEGMENT_HARD_CEILING_S:.0f} s "
                 f"max_retries={MAX_AVOIDANCE_RETRIES}"
             )
+            print(
+                "[CFG] cp3 wall-referenced finish: "
+                f"detect_standoff={WALL_DETECT_STANDOFF_MM:.0f} mm "
+                f"approach_target={WALL_APPROACH_TARGET_MM:.0f} mm "
+                f"approach_speed={WALL_APPROACH_SPEED_MM_S:.0f} mm/s "
+                f"clear_path_min={CLEAR_PATH_MIN_MM:.0f} mm "
+                f"front_cone_half={FRONT_CONE_HALF_WIDTH_MM:.0f} mm "
+                f"(turn signs UNVERIFIED)"
+            )
             state = "IDLE"
 
         elif state == "IDLE":
@@ -684,8 +782,9 @@ def run(robot: Robot) -> None:
                             av,
                             "checkpoint 2 -> checkpoint 3 approach",
                             CHECKPOINT_3_APPROACH_DISTANCE_MM,
-                            next_state="CHECKPOINT_3_TURN_RIGHT_1",
+                            next_state="CP3_FACE_WALL",
                             now=now,
+                            terminate_on_wall=True,
                         )
                         last_status_print_at = now
                         state = "OBSTACLE_AVOIDANCE"
@@ -716,15 +815,13 @@ def run(robot: Robot) -> None:
                     if remaining <= OBSTACLE_AVOIDANCE_TOLERANCE_MM + SUCCESS_MARGIN_MM:
                         print_obstacle_avoidance_status(robot, av.get("goal_mm"))
                         next_state = av["next_state"]
-                        if next_state == "CHECKPOINT_3_TURN_RIGHT_1":
-                            print("[FSM] checkpoint 3 approach complete - turning right")
-                            motion_handle = robot.turn_by(
-                                RIGHT_TURN_DEG,
-                                tolerance_deg=TURN_TOLERANCE_DEG,
-                                blocking=False,
-                            )
+                        if next_state == "CP3_FACE_WALL":
+                            # Reached the goal coordinate before the wall came
+                            # into range; hand off to the same wall-referenced
+                            # terminal maneuver rather than ending here.
+                            motion_handle = start_cp3_terminal_maneuver(robot)
                             last_status_print_at = now
-                            state = "CHECKPOINT_3_TURN_RIGHT_1"
+                            state = "CP3_FACE_WALL"
                         else:  # CHECKPOINT_5_MANIPULATOR
                             print("[FSM] CHECKPOINT 4 reached - stopping before checkpoint 5")
                             robot.stop()
@@ -745,22 +842,44 @@ def run(robot: Robot) -> None:
                             safe_stop_to_idle(robot, f"LAPF failed ({av['label']}) - retries exhausted")
                             state = "IDLE"
                 else:
-                    action = evaluate_watchdog(robot, av, now)
-                    if action == "recover":
+                    # cp2->cp3 approach: end the LAPF run as soon as the outer
+                    # course wall is within standoff ahead (Fix #2), instead of
+                    # chasing the drift-corrupted goal coordinate. Only ARM this
+                    # near the top of the field (within WALL_ARM_REMAINING_MM of
+                    # the goal) so a cone in the lower field can't trigger it. The
+                    # cp3->cp4 segment leaves terminate_on_wall False and keeps the
+                    # goal-coordinate termination handled above.
+                    wall_armed = (
+                        av.get("terminate_on_wall")
+                        and remaining_to_goal_mm(robot, av["goal_mm"]) <= WALL_ARM_REMAINING_MM
+                    )
+                    front = front_clearance_mm(robot) if wall_armed else math.inf
+                    if front <= WALL_DETECT_STANDOFF_MM:
                         print(
-                            f"[FSM] LAPF stalled ({av['label']}) - "
-                            f"no progress for {NO_PROGRESS_WINDOW_S:.0f} s, recovering"
+                            f"[FSM] checkpoint 3 approach - outer wall {front:.0f} mm ahead "
+                            f"(<= {WALL_DETECT_STANDOFF_MM:.0f} mm standoff)"
                         )
                         cancel_motion(robot, motion_handle)
-                        motion_handle = None
-                        state, motion_handle = start_recovery(robot, av, now)
+                        motion_handle = start_cp3_terminal_maneuver(robot)
                         last_status_print_at = now
-                    elif action == "giveup":
-                        cancel_motion(robot, motion_handle)
-                        motion_handle = None
-                        safe_stop_to_idle(robot, f"LAPF failed ({av['label']}) - giving up")
-                        state = "IDLE"
-                    # action == "continue": keep tracking
+                        state = "CP3_FACE_WALL"
+                    else:
+                        action = evaluate_watchdog(robot, av, now)
+                        if action == "recover":
+                            print(
+                                f"[FSM] LAPF stalled ({av['label']}) - "
+                                f"no progress for {NO_PROGRESS_WINDOW_S:.0f} s, recovering"
+                            )
+                            cancel_motion(robot, motion_handle)
+                            motion_handle = None
+                            state, motion_handle = start_recovery(robot, av, now)
+                            last_status_print_at = now
+                        elif action == "giveup":
+                            cancel_motion(robot, motion_handle)
+                            motion_handle = None
+                            safe_stop_to_idle(robot, f"LAPF failed ({av['label']}) - giving up")
+                            state = "IDLE"
+                        # action == "continue": keep tracking
 
         elif state == "OBSTACLE_RECOVERY_REVERSE":
             if robot.was_button_pressed(Button.BTN_2):
@@ -810,69 +929,147 @@ def run(robot: Robot) -> None:
                     last_status_print_at = now
                     state = "OBSTACLE_AVOIDANCE"
 
-        elif state == "CHECKPOINT_3_TURN_RIGHT_1":
+        elif state == "CP3_FACE_WALL":
+            # Square up to the outer course wall (turn started on entry).
             if robot.was_button_pressed(Button.BTN_2):
                 cancel_motion(robot, motion_handle)
                 motion_handle = None
                 show_idle_leds(robot)
-                print("[FSM] IDLE - checkpoint 3 first right turn cancelled")
+                print("[FSM] IDLE - cp3 face-wall turn cancelled")
                 state = "IDLE"
             elif motion_handle is not None and motion_handle.is_finished():
-                print("[FSM] checkpoint 3 first right turn complete - driving 1 tile")
-                motion_handle = robot.move_forward(
-                    CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM,
-                    velocity=DRIVE_VELOCITY_MM_S,
-                    tolerance=DRIVE_TOLERANCE_MM,
-                    blocking=False,
+                print(
+                    "[FSM] squared up to wall - approaching to "
+                    f"{WALL_APPROACH_TARGET_MM:.0f} mm standoff"
                 )
+                motion_handle = None
+                av["wall_approach_started_at"] = now
                 last_status_print_at = now
-                state = "CHECKPOINT_3_FINAL_STRAIGHT"
+                state = "CP3_APPROACH_WALL"
 
-        elif state == "CHECKPOINT_3_FINAL_STRAIGHT":
+        elif state == "CP3_APPROACH_WALL":
+            # Closed-loop creep toward the wall until the front cone reads the
+            # target standoff. Velocity-controlled (no MotionHandle), so this
+            # state carries its OWN timeout — it is not under the LAPF watchdog.
+            if robot.was_button_pressed(Button.BTN_2):
+                robot.stop()
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - cp3 wall approach cancelled")
+                state = "IDLE"
+            else:
+                front = front_clearance_mm(robot)
+                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                    x, y, theta = robot.get_pose()
+                    front_str = "inf" if math.isinf(front) else f"{front:.0f}"
+                    print(
+                        f"  cp3 wall approach odom=({x:6.0f}, {y:6.0f}) mm "
+                        f"theta={theta:5.1f} deg front={front_str} mm"
+                    )
+                    last_status_print_at = now
+
+                if front <= WALL_APPROACH_TARGET_MM:
+                    robot.stop()
+                    print(
+                        f"[FSM] reached wall standoff ({front:.0f} mm) - "
+                        "facing finish straightaway"
+                    )
+                    motion_handle = robot.turn_by(
+                        CP3_FACE_STRAIGHTAWAY_TURN_DEG,
+                        tolerance_deg=TURN_TOLERANCE_DEG,
+                        blocking=False,
+                    )
+                    last_status_print_at = now
+                    state = "CP3_FACE_STRAIGHTAWAY"
+                elif (now - av["wall_approach_started_at"]) >= WALL_APPROACH_TIMEOUT_S:
+                    safe_stop_to_idle(
+                        robot,
+                        "cp3 wall approach timed out - wall not reached "
+                        "(check detection / standoffs / turn sign)",
+                    )
+                    state = "IDLE"
+                elif math.isfinite(front):
+                    robot.set_velocity(WALL_APPROACH_SPEED_MM_S, 0.0)
+                else:
+                    # Wall not in the forward cone - hold rather than drive blind;
+                    # the timeout above will flag it.
+                    robot.stop()
+
+        elif state == "CP3_FACE_STRAIGHTAWAY":
+            # Turn onto the checkpoint-3 finish straightaway (turn started on entry).
             if robot.was_button_pressed(Button.BTN_2):
                 cancel_motion(robot, motion_handle)
                 motion_handle = None
                 show_idle_leds(robot)
-                print("[FSM] IDLE - checkpoint 3 final straight cancelled")
+                print("[FSM] IDLE - cp3 face-straightaway turn cancelled")
+                state = "IDLE"
+            elif motion_handle is not None and motion_handle.is_finished():
+                motion_handle = None
+                print("[FSM] facing finish straightaway - verifying path is clear")
+                state = "CP3_VERIFY_STRAIGHTAWAY"
+
+        elif state == "CP3_VERIFY_STRAIGHTAWAY":
+            # One-shot alignment check: a clear forward cone means we are lined up
+            # with the straightaway. If blocked, flag and stop rather than drive
+            # blind (per design decision).
+            if robot.was_button_pressed(Button.BTN_2):
+                robot.stop()
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - cp3 straightaway verify cancelled")
+                state = "IDLE"
+            else:
+                front = front_clearance_mm(robot)
+                front_str = "inf" if math.isinf(front) else f"{front:.0f}"
+                if front >= CLEAR_PATH_MIN_MM:
+                    print(
+                        f"[FSM] straightaway clear (nearest {front_str} mm) - "
+                        "driving to checkpoint 3"
+                    )
+                    motion_handle = robot.move_forward(
+                        CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM,
+                        velocity=DRIVE_VELOCITY_MM_S,
+                        tolerance=DRIVE_TOLERANCE_MM,
+                        blocking=False,
+                    )
+                    last_status_print_at = now
+                    state = "CP3_DRIVE_STRAIGHTAWAY"
+                else:
+                    safe_stop_to_idle(
+                        robot,
+                        f"straightaway blocked ({front_str} mm < {CLEAR_PATH_MIN_MM:.0f} mm) "
+                        "- not aligned",
+                    )
+                    state = "IDLE"
+
+        elif state == "CP3_DRIVE_STRAIGHTAWAY":
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - cp3 straightaway drive cancelled")
                 state = "IDLE"
             else:
                 if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
                     x, y, theta = robot.get_odometry_pose()
                     print(
-                        f"  checkpoint 3 final straight odom=({x:6.0f}, {y:6.0f}) mm "
+                        f"  cp3 straightaway odom=({x:6.0f}, {y:6.0f}) mm "
                         f"theta={theta:5.1f} deg"
                     )
                     last_status_print_at = now
 
                 if motion_handle is not None and motion_handle.is_finished():
-                    print("[FSM] checkpoint 3 final straight complete - turning right")
-                    motion_handle = robot.turn_by(
-                        RIGHT_TURN_DEG,
-                        tolerance_deg=TURN_TOLERANCE_DEG,
-                        blocking=False,
+                    print("[FSM] CHECKPOINT 3 reached - starting checkpoint 4 obstacle avoidance")
+                    motion_handle = begin_avoidance_segment(
+                        robot,
+                        av,
+                        "checkpoint 3 -> checkpoint 4",
+                        CHECKPOINT_4_DISTANCE_MM,
+                        next_state="CHECKPOINT_5_MANIPULATOR",
+                        now=now,
                     )
                     last_status_print_at = now
-                    state = "CHECKPOINT_3_TURN_RIGHT_2"
-
-        elif state == "CHECKPOINT_3_TURN_RIGHT_2":
-            if robot.was_button_pressed(Button.BTN_2):
-                cancel_motion(robot, motion_handle)
-                motion_handle = None
-                show_idle_leds(robot)
-                print("[FSM] IDLE - checkpoint 3 second right turn cancelled")
-                state = "IDLE"
-            elif motion_handle is not None and motion_handle.is_finished():
-                print("[FSM] CHECKPOINT 3 reached - starting checkpoint 4 obstacle avoidance")
-                motion_handle = begin_avoidance_segment(
-                    robot,
-                    av,
-                    "checkpoint 3 -> checkpoint 4",
-                    CHECKPOINT_4_DISTANCE_MM,
-                    next_state="CHECKPOINT_5_MANIPULATOR",
-                    now=now,
-                )
-                last_status_print_at = now
-                state = "OBSTACLE_AVOIDANCE"
+                    state = "OBSTACLE_AVOIDANCE"
 
         elif state == "CHECKPOINT_5_MANIPULATOR":
             # Robot is stopped at checkpoint 4. Run the manipulator scaffold once,
