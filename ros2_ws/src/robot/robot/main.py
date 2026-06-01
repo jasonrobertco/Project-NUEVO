@@ -84,10 +84,8 @@ RIGHT_ANGLE_TURN_DEG = 82.0
 CHECKPOINT_1_APPROACH_DISTANCE_MM = 2600.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
 BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
-# Post-bridge exit hop toward the obstacle section. NO LONGER USED by the mission:
-# the fixed open-loop drive landed a variable distance from the obstacle-course wall
-# (bridge drift), so it was replaced by the lidar CP2_APPROACH_WALL creep (see
-# CP2_WALL_APPROACH_* below). Kept for reference / as a fallback distance.
+# Post-bridge exit hop: short open-loop drive between the two left turns to round
+# the corner onto the obstacle course. Hand-tuned, not a course tile.
 BRIDGE_EXIT_DISTANCE_MM = 600.0
 
 # --- Bridge-entry wall-square correction -----------------------------------
@@ -258,16 +256,6 @@ WALL_APPROACH_TIMEOUT_S = 8.0          # watchdog for the approach drive (not un
 # the backstop if it never settles.
 WALL_APPROACH_BAND_MM = 50.0           # in-range window is [TARGET-BAND, TARGET], e.g. 200-250 mm
 WALL_APPROACH_CONFIRM_FRAMES = 3       # consecutive in-range front reads required before turning
-# Post-bridge (checkpoint 2) approach to the obstacle-course wall. This REPLACES the
-# old fixed BRIDGE_EXIT_DISTANCE_MM drive: bridge drift made that land a variable
-# distance from the wall, so instead we creep forward under lidar and only turn onto
-# the course once the front clearance settles in the same reasonable standoff band as
-# the cp3 finish (WALL_APPROACH_TARGET_MM +/- WALL_APPROACH_BAND_MM, confirmed over
-# WALL_APPROACH_CONFIRM_FRAMES reads). The wall is reliably ahead; if a frame doesn't
-# see it we keep creeping to close on it, capped by MAX_ADVANCE so we never drive
-# blind forever, with the timeout as a second backstop.
-CP2_WALL_APPROACH_MAX_ADVANCE_MM = 1200.0  # safety cap on forward creep before safe-stop
-CP2_WALL_APPROACH_TIMEOUT_S = 20.0         # watchdog (>= MAX_ADVANCE / WALL_APPROACH_SPEED_MM_S)
 CLEAR_PATH_MIN_MM = 1000.0             # straightaway is "clear" if nearest front return is beyond this
 FRONT_CONE_HALF_WIDTH_MM = 150.0       # half-width of the forward cone used to read the wall
 FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading the wall
@@ -352,7 +340,7 @@ SLALOM_SCAN_LOOKAHEAD_MM = 1600.0      # straight-ahead pursuit target distance 
 # ~25 s before weaving). Failures are caught by the per-cone guards first.
 SLALOM_SEGMENT_CEILING_S = 60.0
 
-StepKind = Literal["move_to", "turn_by", "move_forward", "square_to_wall", "approach_wall"]
+StepKind = Literal["move_to", "turn_by", "move_forward", "square_to_wall"]
 
 
 @dataclass(frozen=True)
@@ -374,10 +362,7 @@ MISSION_STEPS: tuple[MissionStep, ...] = (
     MissionStep("square up to bridge axis", "square_to_wall", 0.0),
     MissionStep("cross bridge", "move_forward", BRIDGE_CROSS_DISTANCE_MM),
     MissionStep("turn left after bridge", "turn_by", -RIGHT_ANGLE_TURN_DEG),
-    # Lidar creep to the obstacle-course wall (replaces the old fixed
-    # BRIDGE_EXIT_DISTANCE_MM drive). Handled by the CP2_APPROACH_WALL state, not a
-    # MotionHandle; value is unused. Stops at WALL_APPROACH_TARGET_MM +/- BAND.
-    MissionStep("approach obstacle-course wall (lidar)", "approach_wall", 0.0),
+    MissionStep("drive past bridge exit toward obstacle section", "move_forward", BRIDGE_EXIT_DISTANCE_MM),
     MissionStep("turn left toward obstacle course", "turn_by", -RIGHT_ANGLE_TURN_DEG),
 
     # Checkpoint 2 reached here. Robot should be facing the cones/obstacle
@@ -1324,107 +1309,12 @@ def run(robot: Robot) -> None:
                             )
                             last_status_print_at = now
                             state = "OBSTACLE_AVOIDANCE"
-                    elif MISSION_STEPS[step_index].kind == "approach_wall":
-                        # Closed-loop lidar creep to the obstacle-course wall - its
-                        # own state, not a MotionHandle the MOVING loop can poll.
-                        robot.stop()
-                        motion_handle = None
-                        x0, y0, _ = robot.get_pose()
-                        av["cp2_wall_start_x"] = x0
-                        av["cp2_wall_start_y"] = y0
-                        av["cp2_wall_started_at"] = now
-                        av["cp2_wall_inrange_count"] = 0
-                        last_status_print_at = now
-                        print(
-                            f"[FSM] MOVING - step {step_index + 1}/{len(MISSION_STEPS)}: "
-                            f"{MISSION_STEPS[step_index].label}"
-                        )
-                        state = "CP2_APPROACH_WALL"
                     else:
                         motion_handle = start_step(robot, MISSION_STEPS[step_index])
                         print(
                             f"[FSM] MOVING - started step {step_index + 1}/{len(MISSION_STEPS)}: "
                             f"{MISSION_STEPS[step_index].label}"
                         )
-
-        elif state == "CP2_APPROACH_WALL":
-            # Post-bridge approach: creep toward the obstacle-course wall and only turn
-            # onto the course once the front clearance has settled in the reasonable
-            # standoff band (same checker as the cp3 finish). The wall is reliably
-            # ahead, so an out-of-range/not-yet-seen read means keep creeping; the
-            # MAX_ADVANCE cap and timeout below are the backstops.
-            if robot.was_button_pressed(Button.BTN_2):
-                robot.stop()
-                motion_handle = None
-                show_idle_leds(robot)
-                print("[FSM] IDLE - post-bridge wall approach cancelled")
-                state = "IDLE"
-            else:
-                front = front_clearance_mm(robot)
-                in_lower = WALL_APPROACH_TARGET_MM - WALL_APPROACH_BAND_MM
-                in_range = in_lower <= front <= WALL_APPROACH_TARGET_MM
-                x, y, theta = robot.get_pose()
-                advanced = math.hypot(
-                    x - av["cp2_wall_start_x"], y - av["cp2_wall_start_y"]
-                )
-
-                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
-                    front_str = "inf" if math.isinf(front) else f"{front:.0f}"
-                    print(
-                        f"  cp2 wall approach odom=({x:6.0f}, {y:6.0f}) mm "
-                        f"theta={theta:5.1f} deg front={front_str} mm "
-                        f"advanced={advanced:.0f}/{CP2_WALL_APPROACH_MAX_ADVANCE_MM:.0f} mm "
-                        f"(want {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm, "
-                        f"in-range {av['cp2_wall_inrange_count']}/{WALL_APPROACH_CONFIRM_FRAMES})"
-                    )
-                    last_status_print_at = now
-
-                if in_range:
-                    # In the reasonable standoff band: hold and require a few
-                    # consecutive in-range reads so a single noisy frame can't fire
-                    # the turn at the wrong distance.
-                    robot.stop()
-                    av["cp2_wall_inrange_count"] += 1
-                    if av["cp2_wall_inrange_count"] >= WALL_APPROACH_CONFIRM_FRAMES:
-                        print(
-                            f"[FSM] post-bridge wall standoff confirmed at {front:.0f} mm "
-                            f"(within {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm "
-                            f"for {WALL_APPROACH_CONFIRM_FRAMES} reads) - "
-                            "turning onto obstacle course"
-                        )
-                        step_index += 1
-                        motion_handle = start_step(robot, MISSION_STEPS[step_index])
-                        print(
-                            f"[FSM] MOVING - started step {step_index + 1}/{len(MISSION_STEPS)}: "
-                            f"{MISSION_STEPS[step_index].label}"
-                        )
-                        last_status_print_at = now
-                        state = "MOVING"
-                elif advanced >= CP2_WALL_APPROACH_MAX_ADVANCE_MM:
-                    safe_stop_to_idle(
-                        robot,
-                        f"post-bridge wall approach exceeded {CP2_WALL_APPROACH_MAX_ADVANCE_MM:.0f} mm "
-                        "without reaching the wall standoff (check wall detection / standoffs)",
-                    )
-                    state = "IDLE"
-                elif (now - av["cp2_wall_started_at"]) >= CP2_WALL_APPROACH_TIMEOUT_S:
-                    safe_stop_to_idle(
-                        robot,
-                        "post-bridge wall approach timed out - front never settled in the "
-                        f"{in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm range",
-                    )
-                    state = "IDLE"
-                elif math.isfinite(front) and front < in_lower:
-                    # Closer than the band's lower edge: too close to creep further.
-                    # Hold and keep sampling - jitter may settle back into range; the
-                    # backstops above handle a genuinely-too-close stall.
-                    robot.stop()
-                    av["cp2_wall_inrange_count"] = 0
-                else:
-                    # front > target, or wall not yet in the forward cone (inf): keep
-                    # creeping forward to close on / find the wall.
-                    av["cp2_wall_inrange_count"] = 0
-                    robot.set_velocity(WALL_APPROACH_SPEED_MM_S, 0.0)
 
         elif state == "OBSTACLE_AVOIDANCE":
             if robot.was_button_pressed(Button.BTN_2):
