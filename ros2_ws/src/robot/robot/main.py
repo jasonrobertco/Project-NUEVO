@@ -81,9 +81,9 @@ RIGHT_ANGLE_TURN_DEG = 80.0
 # physical bridge/ramp, not derived from the course grid. Do not change them
 # without re-tuning on the venue — the cp1/2 sequence is meant to stay
 # behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 2500.0   # start -> checkpoint 1 approach point
-BRIDGE_ALIGN_DISTANCE_MM = 400.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 2600.0   # start -> checkpoint 1 approach point
+BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
+BRIDGE_CROSS_DISTANCE_MM = 2100.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
 # it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
 # 610 mm course grid (COURSE_TILE_MM). Previously written as TILE_MM * 1.5 with
