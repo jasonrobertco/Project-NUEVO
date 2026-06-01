@@ -49,6 +49,7 @@ def main(args=None) -> None:
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
 
     try:
+        # from robot.main import run
         from robot.main import run
         run(node.robot)
     except KeyboardInterrupt:
