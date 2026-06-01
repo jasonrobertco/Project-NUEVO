@@ -91,6 +91,31 @@ BRIDGE_CROSS_DISTANCE_MM = 2100.0            # length of the bridge/ramp crossin
 # literal so it can't be confused with the course grid.
 BRIDGE_EXIT_DISTANCE_MM = 600.0
 
+# --- Bridge-entry wall-square correction -----------------------------------
+# The bridge is crossed open-loop on odometry over a long distance, so any
+# heading error left by the two preceding 90-degree turns becomes a large
+# lateral deviation (deviation ~= BRIDGE_CROSS_DISTANCE_MM * sin(theta_err)).
+# Right after the 2nd turn the LiDAR sees a wall to the LEFT (parallel to the
+# crossing) and a wall BEHIND (perpendicular). We fit a line to each and turn
+# to null the heading error before committing to the crossing. This corrects
+# HEADING only, not lateral offset.
+#
+# FIELD TUNING REQUIRED. The two wall standoffs below MUST be measured at the
+# bridge mouth on the venue, and the correction SIGN is UNVERIFIED (same
+# caveat as the scripted turns) — bench-test the direction before trusting it
+# on the bridge. The correction is deliberately conservative: it does NOTHING
+# (no turn) whenever the scan is ambiguous, so a noisy read cannot make the
+# crossing worse.
+BRIDGE_SQUARE_ENABLED = True
+BRIDGE_LEFT_WALL_DIST_MM = 200.0          # expected perpendicular distance to the left wall
+BRIDGE_REAR_WALL_DIST_MM = 500.0          # expected distance to the wall behind
+BRIDGE_WALL_BAND_MM = 250.0               # keep points within +/- this of the expected standoff
+BRIDGE_WALL_SAMPLE_DEPTH_MM = 800.0       # along-wall window of points to fit
+BRIDGE_SQUARE_MIN_POINTS = 8              # minimum inliers to trust a line fit
+BRIDGE_SQUARE_DEADBAND_DEG = 1.5          # below this error, don't bother turning
+BRIDGE_SQUARE_MAX_CORRECTION_DEG = 15.0   # refuse larger corrections (guards a bad fit)
+BRIDGE_SQUARE_CROSSCHECK_DEG = 6.0        # left vs rear estimates must agree within this
+
 # Checkpoint 2 and later obstacle-avoidance course sections.
 # The UI/course grid uses 610 mm cells (see WorldCanvas.tsx / vm_demo.py).
 COURSE_TILE_MM = 610.0
@@ -300,7 +325,7 @@ SLALOM_SCAN_LOOKAHEAD_MM = 1600.0      # straight-ahead pursuit target distance 
 # ~25 s before weaving). Failures are caught by the per-cone guards first.
 SLALOM_SEGMENT_CEILING_S = 60.0
 
-StepKind = Literal["move_to", "turn_by", "move_forward"]
+StepKind = Literal["move_to", "turn_by", "move_forward", "square_to_wall"]
 
 
 @dataclass(frozen=True)
@@ -317,6 +342,9 @@ MISSION_STEPS: tuple[MissionStep, ...] = (
     MissionStep("turn right to face bridge", "turn_by", RIGHT_ANGLE_TURN_DEG),
 
     # Checkpoint 1 reached here.
+    # Re-reference heading against the bridge-mouth walls before the long
+    # open-loop crossing, so turn error doesn't drift us off the ramp.
+    MissionStep("square up to bridge axis", "square_to_wall", 0.0),
     MissionStep("cross bridge", "move_forward", BRIDGE_CROSS_DISTANCE_MM),
     MissionStep("turn left after bridge", "turn_by", -RIGHT_ANGLE_TURN_DEG),
     MissionStep("drive past bridge exit toward obstacle section", "move_forward", BRIDGE_EXIT_DISTANCE_MM),
@@ -426,6 +454,17 @@ def start_step(robot: Robot, step: MissionStep):
             blocking=False,
         )
 
+    if step.kind == "square_to_wall":
+        # Measure the heading error against the bridge-mouth walls and null it.
+        # When the read is ambiguous the estimator returns 0.0, so this becomes
+        # a turn_by(0) that completes immediately and the FSM advances normally.
+        error_deg = estimate_bridge_heading_error_deg(robot)
+        return robot.turn_by(
+            -error_deg,
+            tolerance_deg=TURN_TOLERANCE_DEG,
+            blocking=False,
+        )
+
     raise ValueError(f"Unknown mission step kind: {step.kind}")
 
 
@@ -523,6 +562,97 @@ def front_clearance_mm(
         if px < nearest:
             nearest = px
     return nearest
+
+
+def _fit_line_angle_deg(points: list[tuple[float, float]]) -> float | None:
+    """Principal-axis angle of a 2D point set, in degrees, CCW from robot +x.
+
+    Total-least-squares fit (covariance principal axis), so it handles
+    near-vertical walls that an ordinary y=mx+b fit blows up on. Returns the
+    angle in [-90, 90], or None if the cloud is degenerate (collinear-free /
+    too few points).
+    """
+    n = len(points)
+    if n < 2:
+        return None
+    mx = sum(p[0] for p in points) / n
+    my = sum(p[1] for p in points) / n
+    sxx = sum((p[0] - mx) ** 2 for p in points)
+    syy = sum((p[1] - my) ** 2 for p in points)
+    sxy = sum((p[0] - mx) * (p[1] - my) for p in points)
+    if sxx + syy <= 1e-9:
+        return None
+    return math.degrees(0.5 * math.atan2(2.0 * sxy, sxx - syy))
+
+
+def estimate_bridge_heading_error_deg(robot: Robot) -> float:
+    """Heading error (deg) at the bridge mouth, measured against the walls.
+
+    A positive result means the robot is rotated such that turn_by(-error)
+    squares it up onto the bridge axis (SIGN UNVERIFIED — confirm on the
+    venue). Uses the LEFT wall (parallel to travel) as the primary reference
+    and the REAR wall (perpendicular) as an independent cross-check.
+
+    Returns 0.0 (caller should not turn) whenever the read is ambiguous: too
+    few wall points, an implausibly large fit, or the two walls disagreeing.
+    Corrects HEADING only; lateral offset in the lane is not observed here.
+    """
+    if not BRIDGE_SQUARE_ENABLED:
+        return 0.0
+
+    cloud = robot.get_obstacles()  # robot frame, mm: fwd=+x, left=+y
+
+    # Left wall: points off the +y side, near the expected standoff, within a
+    # forward/back window so we fit the local segment beside the robot.
+    left_pts = [
+        (x, y) for (x, y) in cloud
+        if y > 0.0
+        and abs(y - BRIDGE_LEFT_WALL_DIST_MM) <= BRIDGE_WALL_BAND_MM
+        and abs(x) <= BRIDGE_WALL_SAMPLE_DEPTH_MM
+    ]
+    if len(left_pts) < BRIDGE_SQUARE_MIN_POINTS:
+        print(f"[bridge-square] left wall: {len(left_pts)} pts "
+              f"(<{BRIDGE_SQUARE_MIN_POINTS}); skipping correction")
+        return 0.0
+
+    left_angle = _fit_line_angle_deg(left_pts)
+    if left_angle is None:
+        print("[bridge-square] left wall fit degenerate; skipping correction")
+        return 0.0
+    # Left wall runs parallel to travel: its principal axis ~= robot +x when
+    # squared, so the line's tilt off 0 deg IS the heading error.
+    error_deg = left_angle
+
+    # Rear wall cross-check (perpendicular to travel: principal axis ~= +/-90
+    # deg when squared, so deviation from 90 is the heading error).
+    rear_pts = [
+        (x, y) for (x, y) in cloud
+        if x < 0.0
+        and abs(abs(x) - BRIDGE_REAR_WALL_DIST_MM) <= BRIDGE_WALL_BAND_MM
+        and abs(y) <= BRIDGE_WALL_SAMPLE_DEPTH_MM
+    ]
+    if len(rear_pts) >= BRIDGE_SQUARE_MIN_POINTS:
+        rear_angle = _fit_line_angle_deg(rear_pts)
+        if rear_angle is not None:
+            rear_error = rear_angle - 90.0 if rear_angle >= 0.0 else rear_angle + 90.0
+            if abs(error_deg - rear_error) > BRIDGE_SQUARE_CROSSCHECK_DEG:
+                print(f"[bridge-square] left ({error_deg:+.1f}) and rear "
+                      f"({rear_error:+.1f}) disagree > {BRIDGE_SQUARE_CROSSCHECK_DEG}; "
+                      "skipping correction")
+                return 0.0
+            error_deg = 0.5 * (error_deg + rear_error)  # steadier averaged estimate
+
+    if abs(error_deg) > BRIDGE_SQUARE_MAX_CORRECTION_DEG:
+        print(f"[bridge-square] correction {error_deg:+.1f} deg exceeds clamp "
+              f"{BRIDGE_SQUARE_MAX_CORRECTION_DEG}; skipping (suspect fit)")
+        return 0.0
+    if abs(error_deg) < BRIDGE_SQUARE_DEADBAND_DEG:
+        print(f"[bridge-square] heading error {error_deg:+.1f} deg within "
+              "deadband; no turn")
+        return 0.0
+
+    print(f"[bridge-square] squaring up: heading error {error_deg:+.1f} deg")
+    return error_deg
 
 
 def advance_along_axis_mm(robot: Robot, av: dict) -> float:
