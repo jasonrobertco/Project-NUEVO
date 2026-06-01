@@ -82,7 +82,7 @@ RIGHT_ANGLE_TURN_DEG = 80.0
 # without re-tuning on the venue — the cp1/2 sequence is meant to stay
 # behaviorally fixed.
 CHECKPOINT_1_APPROACH_DISTANCE_MM = 2500.0   # start -> checkpoint 1 approach point
-BRIDGE_ALIGN_DISTANCE_MM = 600.0             # short nudge into the bridge lane
+BRIDGE_ALIGN_DISTANCE_MM = 400.0             # short nudge into the bridge lane
 BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
 # it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
@@ -284,10 +284,18 @@ CONE_GATE_FORWARD_MM = 250.0           # push the gate this far PAST the cone so
 CONE_PASSED_MARGIN_MM = 150.0          # along-axis margin past the cone to call it passed
 # Slalom guards / motion.
 CONE_SCAN_MAX_ADVANCE_MM = 1100.0      # per-cone: fail if we advance this far in SCAN without a cone
-CONE_GATE_TIMEOUT_S = 8.0              # per-cone: fail if a gate isn't cleared within this
+# Per-cone gate timeout SCALES with the distance to cover (inter-cone gaps vary),
+# like the LAPF watchdog's attempt_cap_s(). A fixed 8 s fired ~1 s too early on a
+# wider gap (robot was moving steadily the whole time, just had ~1010 mm to go at
+# 120 mm/s ~= 8.4 s). timeout = max(floor, factor * gate_distance / speed).
+CONE_GATE_TIMEOUT_FACTOR = 2.0         # safety multiple over the nominal traverse time
+CONE_GATE_TIMEOUT_FLOOR_S = 6.0        # never less than this, for short gaps
 CONE_EXIT_ADVANCE_MM = 300.0           # settle distance past cone 3 before the wall maneuver
 SLALOM_SCAN_LOOKAHEAD_MM = 1600.0      # straight-ahead pursuit target distance while scanning
-SLALOM_SEGMENT_CEILING_S = 35.0        # global anti-hang for the whole slalom
+# Whole-slalom anti-hang. Must cover ~3 m of weaving travel at SLALOM_SPEED plus
+# scans/settles, so it is generous (35 s was too tight: ~3 m at 120 mm/s alone is
+# ~25 s before weaving). Failures are caught by the per-cone guards first.
+SLALOM_SEGMENT_CEILING_S = 60.0
 
 StepKind = Literal["move_to", "turn_by", "move_forward"]
 
@@ -685,10 +693,19 @@ def start_gate(robot: Robot, sl: dict, cone: dict, now: float):
     gate_y = cone["y"] + math.sin(heading) * CONE_GATE_FORWARD_MM + math.sin(perp) * CONE_PASS_CLEARANCE_MM
     sl["current_cone_s"] = cone["S"]
     sl["gate_started_at"] = now
+    # Scale the gate timeout to the distance still to cover (pass threshold minus
+    # current advance), so wider inter-cone gaps get proportionally more time.
+    s_robot, _ = robot_axis_sd(robot, sl)
+    gate_distance = (cone["S"] + CONE_PASSED_MARGIN_MM) - s_robot
+    sl["gate_timeout_s"] = max(
+        CONE_GATE_TIMEOUT_FLOOR_S,
+        CONE_GATE_TIMEOUT_FACTOR * gate_distance / max(SLALOM_SPEED_MM_S, 1e-6),
+    )
     side = "left" if sign > 0 else "right"
     print(
         f"[FSM] cp3 slalom - cone {sl['cone_index']}/3 at S={cone['S']:.0f} D={cone['D']:.0f} "
-        f"r={cone['r']:.0f} mm - passing {side}, gate=({gate_x:.0f}, {gate_y:.0f})"
+        f"r={cone['r']:.0f} mm - passing {side}, gate=({gate_x:.0f}, {gate_y:.0f}), "
+        f"timeout={sl['gate_timeout_s']:.1f} s"
     )
     return robot.move_to(gate_x, gate_y, velocity=SLALOM_SPEED_MM_S, tolerance=DRIVE_TOLERANCE_MM, blocking=False)
 
@@ -1327,14 +1344,14 @@ def run(robot: Robot) -> None:
                         motion_handle = start_scan(robot, sl, now)
                         last_status_print_at = now
                         state = "CP3_SLALOM_SCAN"
-                elif (now - sl["gate_started_at"]) >= CONE_GATE_TIMEOUT_S:
+                elif (now - sl["gate_started_at"]) >= sl["gate_timeout_s"]:
                     cancel_motion(robot, motion_handle)
                     motion_handle = None
                     slalom_fail(
                         robot,
                         sl,
                         f"cp3 slalom - cone {sl['cone_index']}/3 gate not cleared in "
-                        f"{CONE_GATE_TIMEOUT_S:.0f} s",
+                        f"{sl['gate_timeout_s']:.1f} s",
                     )
                     state = "IDLE"
                 # else: keep pursuing the gate
