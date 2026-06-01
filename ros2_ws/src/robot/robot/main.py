@@ -73,9 +73,9 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # physical bridge/ramp, not derived from the course grid. Do not change them
 # without re-tuning on the venue — the cp1/2 sequence is meant to stay
 # behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 2500.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 600.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 2800.0            # length of the bridge/ramp crossing
+BRIDGE_CROSS_DISTANCE_MM = 2300.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop toward the obstacle section. This is NOT a course tile:
 # it is a hand-tuned 450 mm exit distance, kept intentionally independent of the
 # 610 mm course grid (COURSE_TILE_MM). Previously written as TILE_MM * 1.5 with
@@ -197,6 +197,21 @@ WALL_DETECT_STANDOFF_MM = 500.0        # end the LAPF run when the wall is this 
 WALL_ARM_REMAINING_MM = 1200.0         # only arm wall-detection within this much of the goal
                                        # coordinate, so a CONE in the lower field can't
                                        # prematurely trigger the terminal maneuver (~2 tiles)
+# Minimum forward advance before the cp3 terminal turn may fire. Advance is the
+# projection of (current pose - cp2 start) onto the approach heading, so lateral
+# drift / weaving doesn't inflate it. ANDed with the wall/standoff trigger: even
+# once the wall is detected, the turn is HELD until advance reaches this floor,
+# and the approach keeps running until then.
+#
+# Starting value derivation: field reports show the turn currently fires ~300 mm
+# (~half a 610 mm tile) too early. Wall-detection can arm as early as
+# remaining <= WALL_ARM_REMAINING_MM (1200 mm), i.e. advance >= 3050 - 1200 =
+# ~1850 mm along the 5-tile approach, which lines up with that early turn. Adding
+# the ~300 mm correction -> ~2150 mm. NEEDS FIELD TUNING: the fire-time log below
+# prints the exact measured advance, so dial this in from one run rather than
+# guessing (set it to the logged fire advance + ~300, or wherever the turn should
+# actually start).
+CHECKPOINT_3_MIN_ADVANCE_MM = 2150.0
 WALL_APPROACH_TARGET_MM = 250.0        # stop this far from the wall (the re-zero)
 WALL_APPROACH_SPEED_MM_S = 80.0        # slow closed-loop approach speed
 WALL_APPROACH_TIMEOUT_S = 8.0          # watchdog for the approach drive (not under LAPF watchdog)
@@ -436,6 +451,20 @@ def front_clearance_mm(
     return nearest
 
 
+def advance_along_axis_mm(robot: Robot, av: dict) -> float:
+    """Forward progress from the segment start along the approach heading.
+
+    Projection of (current pose - cp2 start) onto the segment heading direction,
+    so lateral drift / weaving does not inflate it (unlike straight-line distance
+    or odometry magnitude). Used by the cp3 minimum-advance gate so the terminal
+    turn can't fire before the robot is genuinely far enough up the field.
+    """
+    x_mm, y_mm, _ = robot.get_pose()
+    start_x_mm, start_y_mm = av["start_mm"]
+    heading_rad = av["seg_heading_rad"]
+    return (x_mm - start_x_mm) * math.cos(heading_rad) + (y_mm - start_y_mm) * math.sin(heading_rad)
+
+
 def start_cp3_terminal_maneuver(robot: Robot):
     """Begin the wall-referenced cp3 terminal maneuver: square up to the wall.
 
@@ -485,7 +514,7 @@ def begin_avoidance_segment(
     it False and keeps the goal-coordinate termination.
     """
     goal_mm = straight_ahead_goal_from_current_pose(robot, distance_mm)
-    _, _, theta_deg = robot.get_pose()
+    start_x_mm, start_y_mm, theta_deg = robot.get_pose()
     handle = issue_lapf(robot, label, goal_mm)
     remaining = remaining_to_goal_mm(robot, goal_mm)
     av.clear()
@@ -493,10 +522,12 @@ def begin_avoidance_segment(
         {
             "label": label,
             "base_goal_mm": goal_mm,
+            "start_mm": (start_x_mm, start_y_mm),
             "seg_heading_rad": math.radians(theta_deg),
             "goal_mm": goal_mm,
             "next_state": next_state,
             "terminate_on_wall": terminate_on_wall,
+            "last_gate_log_at": 0.0,
             "retry_count": 0,
             "recovery_sign": 1,
             "started_at": now,
@@ -844,20 +875,45 @@ def run(robot: Robot) -> None:
                 else:
                     # cp2->cp3 approach: end the LAPF run as soon as the outer
                     # course wall is within standoff ahead (Fix #2), instead of
-                    # chasing the drift-corrupted goal coordinate. Only ARM this
-                    # near the top of the field (within WALL_ARM_REMAINING_MM of
-                    # the goal) so a cone in the lower field can't trigger it. The
-                    # cp3->cp4 segment leaves terminate_on_wall False and keeps the
-                    # goal-coordinate termination handled above.
+                    # chasing the drift-corrupted goal coordinate. The terminal
+                    # turn fires only when BOTH guards hold:
+                    #   1. wall armed: within WALL_ARM_REMAINING_MM of the goal, so
+                    #      a cone in the lower field can't trigger it; and
+                    #   2. min advance: at least CHECKPOINT_3_MIN_ADVANCE_MM of
+                    #      forward progress along the approach axis, so the turn
+                    #      can't fire half a tile early. Until advance clears the
+                    #      floor the approach keeps running.
+                    # The cp3->cp4 segment leaves terminate_on_wall False and keeps
+                    # the goal-coordinate termination handled above.
                     wall_armed = (
                         av.get("terminate_on_wall")
                         and remaining_to_goal_mm(robot, av["goal_mm"]) <= WALL_ARM_REMAINING_MM
                     )
                     front = front_clearance_mm(robot) if wall_armed else math.inf
+                    fire_turn = False
                     if front <= WALL_DETECT_STANDOFF_MM:
+                        advance = advance_along_axis_mm(robot, av)
+                        if advance >= CHECKPOINT_3_MIN_ADVANCE_MM:
+                            fire_turn = True
+                        elif (now - av.get("last_gate_log_at", 0.0)) >= STATUS_PRINT_INTERVAL_S:
+                            # Wall is in range but the advance gate is holding the
+                            # turn back — log advance vs. minimum so the constant
+                            # can be tuned precisely from the run.
+                            print(
+                                f"[FSM] cp3 turn held by advance gate: advance {advance:.0f} mm "
+                                f"< min {CHECKPOINT_3_MIN_ADVANCE_MM:.0f} mm "
+                                f"(wall {front:.0f} mm ahead) - continuing approach"
+                            )
+                            av["last_gate_log_at"] = now
+
+                    if fire_turn:
+                        # Final measured advance is printed here so the next run
+                        # gives the exact along-axis distance at which the turn
+                        # fires — dial CHECKPOINT_3_MIN_ADVANCE_MM in from this.
                         print(
-                            f"[FSM] checkpoint 3 approach - outer wall {front:.0f} mm ahead "
-                            f"(<= {WALL_DETECT_STANDOFF_MM:.0f} mm standoff)"
+                            f"[FSM] checkpoint 3 approach - outer wall {front:.0f} mm ahead, "
+                            f"advance {advance:.0f} mm (>= min {CHECKPOINT_3_MIN_ADVANCE_MM:.0f} mm) "
+                            "- squaring up"
                         )
                         cancel_motion(robot, motion_handle)
                         motion_handle = start_cp3_terminal_maneuver(robot)
