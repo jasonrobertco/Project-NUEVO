@@ -6,11 +6,14 @@ Press BTN_1 to start the route. BTN_2 cancels the active motion.
 This version intentionally does not use LiDAR, LAPF, or obstacle avoidance.
 The robot follows a short odometry-only sequence:
 
-1. drive to the checkpoint 2 approach point
+1. drive forward to the checkpoint 1 approach point
 2. turn right 90 degrees
 3. drive forward a short amount
 4. turn right 90 degrees
 5. drive forward across the bridge/ramp
+6. turn left 90 degrees
+7. drive forward 1.5 tiles
+8. turn left 90 degrees toward the obstacle course
 """
 
 from __future__ import annotations
@@ -59,15 +62,15 @@ class MissionStep:
 
 MISSION_STEPS: tuple[MissionStep, ...] = (
     MissionStep("drive to checkpoint 1 approach", "move_forward", CHECKPOINT_1_APPROACH_DISTANCE_MM),
-    MissionStep("turn right toward bridge lane", "turn_by", -90.0),
+    MissionStep("turn right toward bridge lane", "turn_by", 90.0),
     MissionStep("drive into bridge lane", "move_forward", BRIDGE_ALIGN_DISTANCE_MM),
-    MissionStep("turn right to face bridge", "turn_by", -90.0),
+    MissionStep("turn right to face bridge", "turn_by", 90.0),
 
     # Checkpoint 1 reached here.
     MissionStep("cross bridge", "move_forward", BRIDGE_CROSS_DISTANCE_MM),
-    MissionStep("turn left after bridge", "turn_by", 90.0),
+    MissionStep("turn left after bridge", "turn_by", -90.0),
     MissionStep("drive 1.5 tiles toward obstacle section", "move_forward", TILE_MM * 1.5),
-    MissionStep("turn left toward obstacle course", "turn_by", 90.0),
+    MissionStep("turn left toward obstacle course", "turn_by", -90.0),
 
     # Checkpoint 2 reached here. Robot should be facing the cones/obstacle course.
     # TODO: Start obstacle avoidance algorithm here.
