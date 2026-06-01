@@ -75,7 +75,7 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # lower it; if it falls short, raise it. All scripted right-angle turns
 # (cp1/2 sequence and the cp3 terminal turns) reference this so there is one
 # knob to adjust.
-RIGHT_ANGLE_TURN_DEG = 80.0
+RIGHT_ANGLE_TURN_DEG = 82.0
 
 # Checkpoint 1/2 scripted distances. These are EMPIRICALLY HAND-TUNED on the
 # physical bridge/ramp, not derived from the course grid. Do not change them
@@ -280,8 +280,11 @@ CONE_SIDE_MIN_D_MM = 80.0              # |D| below this is too central to read a
 CONE_PASS_SIDES = (1, -1, 1)           # fallback open side per cone: R/L/R -> pass L/R/L (+1 = left)
 # Weave / gate geometry.
 CONE_PASS_CLEARANCE_MM = 375.0         # lateral gate offset to the open side (cone r + half robot + margin)
-CONE_GATE_FORWARD_MM = 250.0           # push the gate this far PAST the cone so pursuit flows through
-CONE_PASSED_MARGIN_MM = 150.0          # along-axis margin past the cone to call it passed
+CONE_PASS_CLEARANCE_TOL_MM = 75.0      # lateral slack: count as clear at (clearance - tol)
+CONE_GATE_FORWARD_MM = 250.0           # push the gate this far PAST the cone. A cone is "passed" only
+                                       # once the robot is BOTH past this forward point AND laterally
+                                       # clear, so it swings AROUND the cone instead of cutting the
+                                       # corner straight through it.
 # Slalom guards / motion.
 CONE_SCAN_MAX_ADVANCE_MM = 1100.0      # per-cone: fail if we advance this far in SCAN without a cone
 # Per-cone gate timeout SCALES with the distance to cover (inter-cone gaps vary),
@@ -638,14 +641,27 @@ def cone_candidate_summary(robot: Robot, sl: dict) -> str:
 
 
 def cone_open_side_sign(sl: dict, cone: dict) -> int:
-    """+1 = pass on the lane's LEFT, -1 = right. Auto from the cone's measured
-    lateral sign (pass opposite the side it sits on); fall back to the known
-    R/L/R pattern when the cone is too central to read a side confidently."""
+    """+1 = pass on the lane's LEFT, -1 = right.
+
+    The known physical R/L/R cone pattern (CONE_PASS_SIDES) is the PRIMARY source.
+    The approach-axis D=0 is the robot's ENTRY point, which drifts >1 m run-to-run,
+    so the measured lateral sign misreads which side a cone is really on (a left
+    cone can read as right). We therefore trust the pattern and only use the
+    measured sign to flag a disagreement (bad detection, or a wrong pattern), not
+    to override.
+    """
+    idx = sl["cone_index"] - 1
+    pattern_sign = CONE_PASS_SIDES[idx] if 0 <= idx < len(CONE_PASS_SIDES) else 1
     d = cone["D"]
     if abs(d) >= CONE_SIDE_MIN_D_MM:
-        return -1 if d > 0.0 else 1
-    idx = sl["cone_index"] - 1
-    return CONE_PASS_SIDES[idx] if 0 <= idx < len(CONE_PASS_SIDES) else 1
+        measured_sign = -1 if d > 0.0 else 1
+        if measured_sign != pattern_sign:
+            print(
+                f"[warn] cp3 slalom - cone {idx + 1} measured open side "
+                f"({'left' if measured_sign > 0 else 'right'}, D={d:.0f}) disagrees with "
+                f"R/L/R pattern ({'left' if pattern_sign > 0 else 'right'}) - trusting pattern"
+            )
+    return pattern_sign
 
 
 def begin_slalom(robot: Robot, sl: dict, now: float) -> None:
@@ -692,11 +708,12 @@ def start_gate(robot: Robot, sl: dict, cone: dict, now: float):
     gate_x = cone["x"] + math.cos(heading) * CONE_GATE_FORWARD_MM + math.cos(perp) * CONE_PASS_CLEARANCE_MM
     gate_y = cone["y"] + math.sin(heading) * CONE_GATE_FORWARD_MM + math.sin(perp) * CONE_PASS_CLEARANCE_MM
     sl["current_cone_s"] = cone["S"]
+    sl["current_cone_d"] = cone["D"]
     sl["gate_started_at"] = now
-    # Scale the gate timeout to the distance still to cover (pass threshold minus
-    # current advance), so wider inter-cone gaps get proportionally more time.
+    # Scale the gate timeout to the distance still to cover (gate forward point
+    # minus current advance), so wider inter-cone gaps get proportionally more time.
     s_robot, _ = robot_axis_sd(robot, sl)
-    gate_distance = (cone["S"] + CONE_PASSED_MARGIN_MM) - s_robot
+    gate_distance = (cone["S"] + CONE_GATE_FORWARD_MM) - s_robot
     sl["gate_timeout_s"] = max(
         CONE_GATE_TIMEOUT_FLOOR_S,
         CONE_GATE_TIMEOUT_FACTOR * gate_distance / max(SLALOM_SPEED_MM_S, 1e-6),
@@ -1315,16 +1332,24 @@ def run(robot: Robot) -> None:
                 state = "IDLE"
             else:
                 s_robot, d_robot = robot_axis_sd(robot, sl)
+                lateral_sep = abs(d_robot - sl["current_cone_d"])
                 if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
                     print(
                         f"  cp3 slalom gate cone {sl['cone_index']}/3 "
                         f"S={s_robot:6.0f} D={d_robot:6.0f} mm "
-                        f"(cone S={sl['current_cone_s']:.0f})"
+                        f"(cone S={sl['current_cone_s']:.0f} D={sl['current_cone_d']:.0f} "
+                        f"sep={lateral_sep:.0f})"
                     )
                     last_status_print_at = now
 
-                passed = s_robot >= sl["current_cone_s"] + CONE_PASSED_MARGIN_MM
-                gate_done = passed or (motion_handle is not None and motion_handle.is_finished())
+                # A cone is cleared only when the robot has BOTH driven past the
+                # gate's forward point AND achieved lateral clearance from the
+                # cone. Forward-only (the old test) let it cut the corner straight
+                # through the cone before the sidestep completed.
+                past_gate = s_robot >= sl["current_cone_s"] + CONE_GATE_FORWARD_MM
+                lateral_clear = lateral_sep >= (CONE_PASS_CLEARANCE_MM - CONE_PASS_CLEARANCE_TOL_MM)
+                reached_gate = motion_handle is not None and motion_handle.is_finished()
+                gate_done = lateral_clear and (past_gate or reached_gate)
                 if (now - sl["started_at"]) >= SLALOM_SEGMENT_CEILING_S:
                     cancel_motion(robot, motion_handle)
                     motion_handle = None
@@ -1333,7 +1358,10 @@ def run(robot: Robot) -> None:
                 elif gate_done:
                     cancel_motion(robot, motion_handle)
                     motion_handle = None
-                    print(f"[FSM] cp3 slalom - cone {sl['cone_index']}/3 passed (advance {s_robot:.0f} mm)")
+                    print(
+                        f"[FSM] cp3 slalom - cone {sl['cone_index']}/3 passed "
+                        f"(advance {s_robot:.0f} mm, lateral sep {lateral_sep:.0f} mm)"
+                    )
                     sl["cone_index"] += 1
                     if sl["cone_index"] > 3:
                         print("[FSM] cp3 slalom - all 3 cones passed - settling into finish lane")
