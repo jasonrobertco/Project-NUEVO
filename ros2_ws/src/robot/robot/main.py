@@ -939,12 +939,24 @@ def drive_gate_carrot(robot: Robot, sl: dict) -> None:
 
 
 def settle_forward(robot: Robot, sl: dict, s_robot: float):
-    """Issue a short straight settle move CONE_EXIT_ADVANCE_MM further up-axis."""
-    heading = sl["heading_rad"]
-    target = s_robot + CONE_EXIT_ADVANCE_MM
-    tx = sl["start_mm"][0] + math.cos(heading) * target
-    ty = sl["start_mm"][1] + math.sin(heading) * target
-    return robot.move_to(tx, ty, velocity=SLALOM_SPEED_MM_S, tolerance=DRIVE_TOLERANCE_MM, blocking=False)
+    """Issue a short straight settle move CONE_EXIT_ADVANCE_MM further forward.
+
+    Drives straight along the current heading (move_forward → _move_along_heading,
+    which terminates deterministically on 1-D distance traveled) rather than a
+    move_to toward a lane-center point. A move_to to a nearby on-axis point lets
+    pure pursuit fall into a limit cycle when the robot exits the last gate off-axis
+    and angled: it overshoots the point, x_r goes <=0 so linear -> 0, and it orbits
+    at a radius wider than the goal tolerance, never finishing and hanging the exit
+    state. We only need forward advance past cone 3 here; absolute lateral position
+    doesn't matter because the finish immediately re-zeroes against the wall. The
+    s_robot arg is kept for the call sites but no longer feeds an absolute target.
+    """
+    return robot.move_forward(
+        CONE_EXIT_ADVANCE_MM,
+        velocity=SLALOM_SPEED_MM_S,
+        tolerance=DRIVE_TOLERANCE_MM,
+        blocking=False,
+    )
 
 
 def slalom_fail(robot: Robot, sl: dict, reason: str) -> None:
