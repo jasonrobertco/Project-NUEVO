@@ -171,13 +171,15 @@ LAPF_FORCE_EMA_ALPHA = 0.35
 # spin-in-place pivot, which is ONLY safe because inflation was dropped to 200.
 # Fix 2 geometry must hold: leash can place the virtual target outside the
 # inflated cone, i.e. reach = leash_length*sin(half_angle) >= eff_radius.
-#   reach = 500 * sin(35 deg) = 287 mm  >=  eff_radius = r_track(<=75) + 200 = 275 mm  (12 mm headroom)
+#   reach = 500 * sin(40 deg) = 321 mm  >=  eff_radius = r_track(<=75) + 200 = 275 mm  (46 mm headroom)
+#   (was 35 deg = 287 mm; widened to 40 for more dodge room on a close dead-ahead cone)
 # >>> DO NOT narrow the leash further (or raise inflation) without re-checking
 #     this inequality, or the target gets re-trapped inside the bubble (nose-in). <<<
 # LAPF_INFLATION_MARGIN_MM = 250.0      # ORIGINAL (revert here): oversized ~325 mm keep-out
 LAPF_INFLATION_MARGIN_MM = 200.0        # ~250-275 mm keep-out; body-edge-to-cone clearance ~33-58 mm
 # LAPF_LEASH_HALF_ANGLE_DEG = 50.0      # ORIGINAL (revert here): wide leash -> target far off-axis -> pivot
-LAPF_LEASH_HALF_ANGLE_DEG = 35.0        # caps target bearing -> pure-pursuit keeps forward speed -> arcs
+# LAPF_LEASH_HALF_ANGLE_DEG = 35.0      # prior: arced but ran out of lateral room on a close dead-ahead cone
+LAPF_LEASH_HALF_ANGLE_DEG = 40.0        # +5 deg steering authority to clear a late dead-ahead cone (still arcs)
 # Forward-clearance throttle (Fix 3): ease off the throttle when a cone is close
 # dead-ahead. Scales LINEAR speed only (angular untouched). NEUTRALIZED: with the
 # right-sized inflation + narrower leash the planner already routes a clean arc,

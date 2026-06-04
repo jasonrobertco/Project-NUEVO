@@ -604,7 +604,11 @@ class LeashedAPFPlanner:
                 rep_side = float(np.dot(rep, perp))
                 self._committed_escape_sign = 1 if rep_side >= 0.0 else -1
             tangent = self._committed_escape_sign * perp
-            total += 0.15 * self._attr_gain * tangent
+            # ESCAPE_GAIN 0.15 -> 0.25: commit to the open side sooner/harder so a
+            # close dead-ahead cone is dodged before the robot runs out of lateral
+            # room. Direction is committed, so a stronger push can't re-introduce
+            # the flip-flop spin. ORIGINAL: total += 0.15 * self._attr_gain * tangent
+            total += 0.25 * self._attr_gain * tangent
 
         return total
 
