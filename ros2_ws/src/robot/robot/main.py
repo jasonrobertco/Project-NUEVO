@@ -81,8 +81,8 @@ RIGHT_ANGLE_TURN_DEG = 82.0
 # physical bridge/ramp, not derived from the course grid. Do not change them
 # without re-tuning on the venue — the cp1/2 sequence is meant to stay
 # behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 2600.0   # start -> checkpoint 1 approach point
-BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 2900.0   # start -> checkpoint 1 approach point
+BRIDGE_ALIGN_DISTANCE_MM = 600.0             # short nudge into the bridge lane
 BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop: short open-loop drive between the two left turns to round
 # the corner onto the obstacle course. Hand-tuned, not a course tile.
@@ -290,7 +290,7 @@ CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish st
 # (no LAPF reverse during slalom; full filter restored at handoff); safe-stop on
 # failure; open side auto-detected with R/L/R fallback. Set SLALOM_ENABLED=False
 # to fall back to the reactive LAPF approach + wall finish.
-SLALOM_ENABLED = True
+SLALOM_ENABLED = False
 SLALOM_SPEED_MM_S = 120.0              # pursuit/creep speed during the slalom (slower than 140 cruise)
 # Layer A — source-level lane window applied to the LiDAR during the slalom only,
 # restored to the full configured filter at handoff / on any exit. Narrowing the
