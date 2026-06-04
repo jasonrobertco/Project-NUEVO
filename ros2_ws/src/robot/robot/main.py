@@ -171,25 +171,30 @@ LAPF_FORCE_EMA_ALPHA = 0.35
 # spin-in-place pivot, which is ONLY safe because inflation was dropped to 200.
 # Fix 2 geometry must hold: leash can place the virtual target outside the
 # inflated cone, i.e. reach = leash_length*sin(half_angle) >= eff_radius.
-#   reach = 500 * sin(40 deg) = 321 mm  >=  eff_radius = r_track(<=75) + 200 = 275 mm  (46 mm headroom)
-#   (was 35 deg = 287 mm; widened to 40 for more dodge room on a close dead-ahead cone)
+#   reach = 500 * sin(45 deg) = 354 mm  >=  eff_radius = r_track(<=75) + 200 = 275 mm  (79 mm headroom)
+#   (was 35 deg = 287 mm, 40 deg = 321 mm; widened to 45 for aggressive dead-ahead-cone dodge room)
 # >>> DO NOT narrow the leash further (or raise inflation) without re-checking
 #     this inequality, or the target gets re-trapped inside the bubble (nose-in). <<<
 # LAPF_INFLATION_MARGIN_MM = 250.0      # ORIGINAL (revert here): oversized ~325 mm keep-out
 LAPF_INFLATION_MARGIN_MM = 200.0        # ~250-275 mm keep-out; body-edge-to-cone clearance ~33-58 mm
 # LAPF_LEASH_HALF_ANGLE_DEG = 50.0      # ORIGINAL (revert here): wide leash -> target far off-axis -> pivot
 # LAPF_LEASH_HALF_ANGLE_DEG = 35.0      # prior: arced but ran out of lateral room on a close dead-ahead cone
-LAPF_LEASH_HALF_ANGLE_DEG = 40.0        # +5 deg steering authority to clear a late dead-ahead cone (still arcs)
-# Forward-clearance throttle (Fix 3): ease off the throttle when a cone is close
-# dead-ahead. Scales LINEAR speed only (angular untouched). NEUTRALIZED: with the
-# right-sized inflation + narrower leash the planner already routes a clean arc,
-# and throttling linear mid-turn (angular stays full) tightened the radius into a
-# pivot -- the forward motion is what carries the robot around the cone. Floor set
-# to 1.0 = no throttle. Code left intact; lower the floor below 1.0 to re-enable.
-LAPF_SLOW_CLEARANCE_START_MM = 450.0   # full speed when nearest cone edge ahead >= this
-LAPF_SLOW_CLEARANCE_STOP_MM = 150.0    # most-slowed (floor) by this edge clearance
-# LAPF_MIN_SPEED_FRAC = 0.5            # ORIGINAL (revert here): mild throttle, floored at half speed
-LAPF_MIN_SPEED_FRAC = 1.0              # NEUTRALIZED: 1.0 = no forward throttle (Fix 3 off, code intact)
+# LAPF_LEASH_HALF_ANGLE_DEG = 40.0      # prior: +5 deg, still clipped the 3rd cone
+LAPF_LEASH_HALF_ANGLE_DEG = 45.0        # aggressive steering authority to clearly swing around a dead-ahead cone
+# Forward-clearance throttle (Fix 3): "see cone -> steer -> confirm clear -> go".
+# Scales LINEAR speed only (angular untouched), so when a cone is close dead-ahead
+# the robot keeps turning hard toward the committed open side while forward speed
+# drops, then ramps back to full as the forward corridor clears -- it won't nose
+# in before the turn develops. RE-ENABLED: safe now that the open-side COMMITTED
+# escape stops the old pivot/spin (with a committed turn direction, throttling
+# forward makes it ARC tightly around the cone instead of spinning in place).
+# Floored at 0.35 (not zero) so it never fully stops/freezes -- it keeps creeping
+# forward while it swings off the cone.
+LAPF_SLOW_CLEARANCE_START_MM = 450.0   # begin easing off when nearest cone edge ahead <= this
+LAPF_SLOW_CLEARANCE_STOP_MM = 150.0    # most-slowed (floor) by this edge clearance (~"cone close")
+# LAPF_MIN_SPEED_FRAC = 0.5            # earlier mild value
+# LAPF_MIN_SPEED_FRAC = 1.0            # PRIOR (revert here): Fix 3 OFF (no throttle)
+LAPF_MIN_SPEED_FRAC = 0.35             # Fix 3 ON: floor 35% so it keeps creeping while swinging off the cone
 
 # ---------------------------------------------------------------------------
 # LAPF stall watchdog + recovery (checkpoint 2+ obstacle-avoidance segments).

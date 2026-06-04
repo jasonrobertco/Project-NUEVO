@@ -591,12 +591,16 @@ class LeashedAPFPlanner:
         #           away /= norm
         #           tangent = np.array([-away[1], away[0]], dtype=float)
         #           total += 0.15 * self._attr_gain * tangent
-        if total_norm > 0.5:
-            # Force is healthy again -> escaped the null; drop the commitment so a
-            # stale lateral lean can't persist up an open lane (hysteresis: arm at
-            # <0.25, release at >0.5).
+        # Thresholds widened so the escape ENGAGES SOONER (arm < 0.6, release > 1.0;
+        # was arm < 0.25 / release > 0.5) -> it starts steering toward the open side
+        # while a dead-ahead cone is only partly cancelling the attraction, instead
+        # of waiting for a near-perfect null. Hysteresis band 0.6..1.0 holds the
+        # commitment through the turn.
+        if total_norm > 1.0:   # ORIGINAL: > 0.5
+            # Force is healthy again -> escaped; drop the commitment so a stale
+            # lateral lean can't persist up an open lane.
             self._committed_escape_sign = None
-        elif nearest_obs is not None and total_norm < 0.25 and goal_dist > 1e-6:
+        elif nearest_obs is not None and total_norm < 0.6 and goal_dist > 1e-6:  # ORIGINAL: < 0.25
             goal_dir = goal_vec / goal_dist
             # perp = goal_dir rotated +90 deg (goal's left). +rep.perp => left open.
             perp = np.array([-goal_dir[1], goal_dir[0]], dtype=float)
@@ -604,11 +608,12 @@ class LeashedAPFPlanner:
                 rep_side = float(np.dot(rep, perp))
                 self._committed_escape_sign = 1 if rep_side >= 0.0 else -1
             tangent = self._committed_escape_sign * perp
-            # ESCAPE_GAIN 0.15 -> 0.25: commit to the open side sooner/harder so a
-            # close dead-ahead cone is dodged before the robot runs out of lateral
-            # room. Direction is committed, so a stronger push can't re-introduce
-            # the flip-flop spin. ORIGINAL: total += 0.15 * self._attr_gain * tangent
-            total += 0.25 * self._attr_gain * tangent
+            # ESCAPE_GAIN 0.15 -> 0.25 -> 0.40: commit to the open side harder so a
+            # close dead-ahead cone is clearly swung around before the robot runs
+            # out of lateral room. Direction is committed, so a stronger/earlier
+            # push can't re-introduce the flip-flop spin.
+            # ORIGINAL: total += 0.15 * self._attr_gain * tangent  (then 0.25)
+            total += 0.40 * self._attr_gain * tangent
 
         return total
 
