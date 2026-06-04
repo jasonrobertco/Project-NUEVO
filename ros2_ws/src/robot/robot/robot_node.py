@@ -49,8 +49,8 @@ def main(args=None) -> None:
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
 
     try:
-        # from robot.main import run
-        from ros2_ws.src.robot.robot.mainMANIP import run
+        from robot.main import run
+        #from ros2_ws.src.robot.robot.mainMANIP import run
         run(node.robot)
     except KeyboardInterrupt:
         _safe_log(node, "info", "robot node interrupted; shutting down")
