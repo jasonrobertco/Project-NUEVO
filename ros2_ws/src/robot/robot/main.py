@@ -133,7 +133,9 @@ CHECKPOINT_3_FINAL_STRAIGHT_TILES = 1.0
 CHECKPOINT_4_STRAIGHT_TILES = 5.0
 
 CHECKPOINT_3_APPROACH_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_APPROACH_TILES
-CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_FINAL_STRAIGHT_TILES
+# CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_FINAL_STRAIGHT_TILES  # ORIGINAL: 610 mm (1 tile)
+# CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = 2600.0  # prior: full straightaway, stopped at the end wall
+CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = 2525.0  # 2600 to the checkpoint, -75 mm backoff from the end wall
 CHECKPOINT_4_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_4_STRAIGHT_TILES
 
 # LAPF tuning for the checkpoint 2+ obstacle-avoidance runs:
@@ -290,7 +292,8 @@ WALL_DETECT_STANDOFF_MM = 500.0        # end the LAPF run when the wall is this 
 # rejects every cone in the lower field. NEEDS FIELD TUNING: the fire-time log
 # below prints the exact measured advance, so dial this in from one run.
 CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM   # 4 tiles (4*610=2440 mm); end wall sits at 5 tiles
-WALL_APPROACH_TARGET_MM = 350.0        # stop this far from the wall (the re-zero)
+# WALL_APPROACH_TARGET_MM = 350.0      # ORIGINAL (revert here): stopped 75 mm closer
+WALL_APPROACH_TARGET_MM = 425.0        # stop this far from the wall (the re-zero); +75 mm backoff
 # WALL_APPROACH_SPEED_MM_S = 80.0      # ORIGINAL (revert here): too slow, timed out ~640 mm short
 WALL_APPROACH_SPEED_MM_S = 150.0       # closed-loop approach speed (closes the full ~1300 mm in time)
 # WALL_APPROACH_TIMEOUT_S = 8.0        # ORIGINAL (revert here): too short to close the full distance
@@ -304,7 +307,7 @@ WALL_APPROACH_TIMEOUT_S = 16.0         # watchdog for the approach drive (not un
 # (if still beyond the band) or hold (if jittering / too close), and every check is
 # logged so the real standoff at turn-time is visible. WALL_APPROACH_TIMEOUT_S is
 # the backstop if it never settles.
-WALL_APPROACH_BAND_MM = 50.0           # in-range window is [TARGET-BAND, TARGET], e.g. 200-250 mm
+WALL_APPROACH_BAND_MM = 50.0           # in-range window is [TARGET-BAND, TARGET], e.g. 375-425 mm
 WALL_APPROACH_CONFIRM_FRAMES = 3       # consecutive in-range front reads required before turning
 CLEAR_PATH_MIN_MM = 1000.0             # straightaway is "clear" if nearest front return is beyond this
 FRONT_CONE_HALF_WIDTH_MM = 150.0       # half-width of the forward cone used to read the wall
@@ -317,13 +320,30 @@ FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading
 CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # turn to face the re-zero wall (SIGN UNVERIFIED; magnitude calibrated)
 CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish straightaway (SIGN UNVERIFIED; magnitude calibrated)
 
+# Forward gap between the TWO wall approaches. After the turn following wall 1
+# there is no wall in the forward cone yet; the robot advances this far before
+# wall 2 comes into range and the second approach can run.
+CP3_GAP_ADVANCE_DISTANCE_MM = 610.0    # ~1 course tile, open-loop forward move between wall 1 turn and wall 2
+
 # Position sanity check after the turn onto the finish straightaway: with the
 # robot squared to the wall at ~standoff then turned 90 deg right, the wall it
 # re-zeroed against should now sit ~standoff away BEHIND and to the LEFT. These
 # are a logged sanity check only -- they WARN if off but never block the drive
 # (turn SIGN is UNVERIFIED, so a flipped sign shows up here as a large/inf read).
-WALL_FINISH_SANITY_TARGET_MM = 300.0   # expected rear and left clearance after the straightaway turn
-WALL_FINISH_SANITY_BAND_MM = 120.0     # warn (don't fail) if a reading is outside target +/- this
+# WALL_FINISH_SANITY_TARGET_MM = 300.0 # ORIGINAL (revert here): tripped spuriously once the standoff went to 425
+WALL_FINISH_SANITY_TARGET_MM = 425.0   # expected rear/left clearance after the final turn (= the 425 mm standoff)
+WALL_FINISH_SANITY_BAND_MM = 120.0     # warn (don't fail) if a reading is outside target +/- this (ok 305-545 mm)
+
+# Finish-straightaway wall-following self-correction. While driving the cp3
+# straightaway, steer gently toward whichever side wall has MORE room so the
+# robot tracks down the middle instead of drifting into a wall. The yaw nudge is
+# proportional to (left - right) clearance, capped, and gentle to avoid
+# oscillation; applied only when BOTH side walls are visible (else drive straight).
+# SIGN is UNVERIFIED: set_velocity is CCW-positive, but if it steers INTO the
+# closer wall (left/right gap DIVERGES instead of converging), flip the sign.
+CP3_STRAIGHTAWAY_CORRECTION_SIGN = 1               # flip to -1 if it corrects the wrong way
+CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM = 0.05   # deg/s of yaw per mm of left-right imbalance
+CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S = 15.0       # cap on the yaw correction (gentle, no oscillation)
 
 
 StepKind = Literal["move_to", "turn_by", "move_forward", "square_to_wall"]
@@ -1316,10 +1336,11 @@ def run(robot: Robot) -> None:
                 state = "IDLE"
             elif motion_handle is not None and motion_handle.is_finished():
                 print(
-                    "[FSM] squared up to wall - approaching to "
+                    "[FSM] squared up to wall 1 - approaching to "
                     f"{WALL_APPROACH_TARGET_MM:.0f} mm standoff"
                 )
                 motion_handle = None
+                av["wall_approach_num"] = 1          # first of two wall approaches
                 av["wall_approach_started_at"] = now
                 av["wall_inrange_count"] = 0
                 last_status_print_at = now
@@ -1362,10 +1383,9 @@ def run(robot: Robot) -> None:
                     av["wall_inrange_count"] += 1
                     if av["wall_inrange_count"] >= WALL_APPROACH_CONFIRM_FRAMES:
                         print(
-                            f"[FSM] wall standoff confirmed at {front:.0f} mm "
-                            f"(within {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm "
-                            f"for {WALL_APPROACH_CONFIRM_FRAMES} reads) - "
-                            "facing finish straightaway"
+                            f"[FSM] wall {av.get('wall_approach_num', 1)} standoff confirmed "
+                            f"at {front:.0f} mm (within {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm "
+                            f"for {WALL_APPROACH_CONFIRM_FRAMES} reads) - turning"
                         )
                         motion_handle = robot.turn_by(
                             CP3_FACE_STRAIGHTAWAY_TURN_DEG,
@@ -1400,17 +1420,73 @@ def run(robot: Robot) -> None:
                     robot.stop()
 
         elif state == "CP3_FACE_STRAIGHTAWAY":
-            # Turn onto the checkpoint-3 finish straightaway (turn started on entry).
+            # Post-wall turn (turn started on entry). After wall 1 this turn faces
+            # the forward gap -> advance CP3_GAP_ADVANCE_DISTANCE_MM before wall 2 is
+            # in range. After wall 2 it faces the finish straightaway -> verify+drive.
+            # ORIGINAL (revert here): single wall, this always went straight to verify:
+            #   elif motion_handle is not None and motion_handle.is_finished():
+            #       motion_handle = None
+            #       print("[FSM] facing finish straightaway - verifying path is clear")
+            #       state = "CP3_VERIFY_STRAIGHTAWAY"
             if robot.was_button_pressed(Button.BTN_2):
                 cancel_motion(robot, motion_handle)
                 motion_handle = None
                 show_idle_leds(robot)
-                print("[FSM] IDLE - cp3 face-straightaway turn cancelled")
+                print("[FSM] IDLE - cp3 post-wall turn cancelled")
                 state = "IDLE"
             elif motion_handle is not None and motion_handle.is_finished():
                 motion_handle = None
-                print("[FSM] facing finish straightaway - verifying path is clear")
-                state = "CP3_VERIFY_STRAIGHTAWAY"
+                if av.get("wall_approach_num", 1) == 1:
+                    # No wall in front yet right after the wall-1 turn: drive the gap
+                    # first, then approach wall 2.
+                    print(
+                        "[FSM] turned after wall 1 - advancing "
+                        f"{CP3_GAP_ADVANCE_DISTANCE_MM:.0f} mm before wall 2 comes into range"
+                    )
+                    motion_handle = robot.move_forward(
+                        CP3_GAP_ADVANCE_DISTANCE_MM,
+                        velocity=DRIVE_VELOCITY_MM_S,
+                        tolerance=DRIVE_TOLERANCE_MM,
+                        blocking=False,
+                    )
+                    last_status_print_at = now
+                    state = "CP3_GAP_ADVANCE"
+                else:
+                    print("[FSM] turned after wall 2 - facing finish straightaway, verifying path is clear")
+                    state = "CP3_VERIFY_STRAIGHTAWAY"
+
+        elif state == "CP3_GAP_ADVANCE":
+            # Forward gap between the two wall approaches: drive ~1 tile so wall 2
+            # enters the forward cone, then run the second approach to the same
+            # 425 mm standoff. Open-loop move_forward (MotionHandle).
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - cp3 gap advance cancelled")
+                state = "IDLE"
+            else:
+                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                    x, y, theta = robot.get_odometry_pose()
+                    front = front_clearance_mm(robot)
+                    front_str = "inf" if math.isinf(front) else f"{front:.0f}"
+                    print(
+                        f"  cp3 gap advance odom=({x:6.0f}, {y:6.0f}) mm "
+                        f"theta={theta:5.1f} deg front={front_str} mm"
+                    )
+                    last_status_print_at = now
+
+                if motion_handle is not None and motion_handle.is_finished():
+                    print(
+                        "[FSM] gap advance done - approaching wall 2 to "
+                        f"{WALL_APPROACH_TARGET_MM:.0f} mm standoff"
+                    )
+                    motion_handle = None
+                    av["wall_approach_num"] = 2          # second of two wall approaches
+                    av["wall_approach_started_at"] = now
+                    av["wall_inrange_count"] = 0
+                    last_status_print_at = now
+                    state = "CP3_APPROACH_WALL"
 
         elif state == "CP3_VERIFY_STRAIGHTAWAY":
             # One-shot alignment check: a clear forward cone means we are lined up
@@ -1452,14 +1528,17 @@ def run(robot: Robot) -> None:
                 if front >= CLEAR_PATH_MIN_MM:
                     print(
                         f"[FSM] straightaway clear (nearest {front_str} mm) - "
-                        "driving to checkpoint 3"
+                        f"driving {CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM:.0f} mm to checkpoint 3 "
+                        "with wall-following"
                     )
-                    motion_handle = robot.move_forward(
-                        CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM,
-                        velocity=DRIVE_VELOCITY_MM_S,
-                        tolerance=DRIVE_TOLERANCE_MM,
-                        blocking=False,
-                    )
+                    # Velocity-controlled wall-following drive (no MotionHandle);
+                    # the CP3_DRIVE_STRAIGHTAWAY loop steers + tracks distance.
+                    # ORIGINAL (revert here): open-loop fixed-distance move_forward:
+                    #   motion_handle = robot.move_forward(
+                    #       CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM,
+                    #       velocity=DRIVE_VELOCITY_MM_S, tolerance=DRIVE_TOLERANCE_MM,
+                    #       blocking=False)
+                    motion_handle = None
                     av["drive_start_mm"] = robot.get_odometry_pose()[:2]
                     last_status_print_at = now
                     state = "CP3_DRIVE_STRAIGHTAWAY"
@@ -1472,30 +1551,30 @@ def run(robot: Robot) -> None:
                     state = "IDLE"
 
         elif state == "CP3_DRIVE_STRAIGHTAWAY":
+            # Velocity-controlled wall-following drive to the cp3 checkpoint. Each
+            # tick reads the left/right side walls and steers gently toward the side
+            # with MORE room so the robot tracks down the middle instead of drifting
+            # into a wall; the rear wall is read as a progress/sanity reference. No
+            # MotionHandle (own velocity loop), so BTN_2 is polled every tick and the
+            # LAPF watchdog does not apply. Terminates on odometry distance.
             if robot.was_button_pressed(Button.BTN_2):
-                cancel_motion(robot, motion_handle)
+                robot.stop()
                 motion_handle = None
                 show_idle_leds(robot)
                 print("[FSM] IDLE - cp3 straightaway drive cancelled")
                 state = "IDLE"
             else:
-                if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
-                    x, y, theta = robot.get_odometry_pose()
-                    sx, sy = av.get("drive_start_mm", (x, y))
-                    traveled = math.hypot(x - sx, y - sy)
-                    remaining = max(0.0, CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM - traveled)
-                    front = front_clearance_mm(robot)
-                    front_str = "inf" if math.isinf(front) else f"{front:.0f}"
-                    print(
-                        f"  cp3 straightaway closing: remaining={remaining:5.0f} mm "
-                        f"front={front_str} mm "
-                        f"(traveled {traveled:.0f}/{CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM:.0f} mm) "
-                        f"odom=({x:6.0f}, {y:6.0f}) theta={theta:5.1f} deg"
-                    )
-                    last_status_print_at = now
+                x, y, theta = robot.get_odometry_pose()
+                sx, sy = av.get("drive_start_mm", (x, y))
+                traveled = math.hypot(x - sx, y - sy)
+                remaining = CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM - traveled
 
-                if motion_handle is not None and motion_handle.is_finished():
-                    print("[FSM] CHECKPOINT 3 reached - starting checkpoint 4 obstacle avoidance")
+                if remaining <= 0.0:
+                    robot.stop()
+                    print(
+                        f"[FSM] CHECKPOINT 3 reached (drove {traveled:.0f} mm) - "
+                        "starting checkpoint 4 obstacle avoidance"
+                    )
                     motion_handle = begin_avoidance_segment(
                         robot,
                         av,
@@ -1506,6 +1585,41 @@ def run(robot: Robot) -> None:
                     )
                     last_status_print_at = now
                     state = "OBSTACLE_AVOIDANCE"
+                else:
+                    left = directional_clearance_mm(robot, "left")
+                    right = directional_clearance_mm(robot, "right")
+                    behind = directional_clearance_mm(robot, "rear")
+                    # Center between the side walls: steer toward the side with more
+                    # room (positive error = more room on the left). Only when BOTH
+                    # walls are seen; off a single wall we can't center, so go straight.
+                    if math.isfinite(left) and math.isfinite(right):
+                        error = left - right
+                        correction = (
+                            CP3_STRAIGHTAWAY_CORRECTION_SIGN
+                            * CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM
+                            * error
+                        )
+                        correction = max(
+                            -CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S,
+                            min(CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S, correction),
+                        )
+                    else:
+                        error = None
+                        correction = 0.0
+                    robot.set_velocity(DRIVE_VELOCITY_MM_S, correction)
+
+                    if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                        left_str = "inf" if math.isinf(left) else f"{left:.0f}"
+                        right_str = "inf" if math.isinf(right) else f"{right:.0f}"
+                        behind_str = "inf" if math.isinf(behind) else f"{behind:.0f}"
+                        err_str = "n/a" if error is None else f"{error:+.0f}"
+                        print(
+                            f"  cp3 straightaway: remaining={remaining:5.0f} mm "
+                            f"left={left_str} right={right_str} behind={behind_str} mm "
+                            f"err(L-R)={err_str} mm corr={correction:+.1f} deg/s "
+                            f"(traveled {traveled:.0f}/{CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM:.0f})"
+                        )
+                        last_status_print_at = now
 
         elif state == "CHECKPOINT_5_MANIPULATOR":
             # Robot is stopped at checkpoint 4. Run the manipulator scaffold once,
