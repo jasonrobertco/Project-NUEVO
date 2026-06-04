@@ -160,7 +160,11 @@ LAPF_LEASH_LENGTH_MM = 500.0
 LAPF_REPULSION_RANGE_MM = 300.0
 LAPF_TARGET_SPEED_MM_S = 200.0
 LAPF_REPULSION_GAIN = 550.0
-LAPF_ATTRACTION_GAIN = 1.0
+# LAPF_ATTRACTION_GAIN = 1.0           # ORIGINAL (revert here): froze in the force-null between cones
+LAPF_ATTRACTION_GAIN = 3.0             # commit-forward bias: drive up through the gap, not balance L/R cones
+                                       # (also strengthens the 0.15*attr_gain tangent escape proportionally).
+                                       # If it CLIPS cones, back down toward ~2.5; if it still FREEZES, next
+                                       # step is the structural forward-arc repulsion filter (not done yet).
 LAPF_FORCE_EMA_ALPHA = 0.35
 # --- Right-sized cone keep-out + arc-not-pivot tuning (applied together; COUPLED) ---
 # These three move as a set. The leash was narrowed to 35 deg to stop the
@@ -220,7 +224,14 @@ WALLCLOCK_CAP_FLOOR_S = 12.0
 SEGMENT_HARD_CEILING_S = 35.0
 MAX_AVOIDANCE_RETRIES = 2
 
-RECOVERY_REVERSE_MM = 300.0              # nominal back-up distance
+# RECOVERY_REVERSE_MM = 300.0            # ORIGINAL (revert here): exceeded ~150 mm forward gain -> walked backward
+RECOVERY_REVERSE_MM = 100.0              # nominal back-up distance (small, so a retry can't net rearward)
+# Only reverse when the robot is genuinely about to hit something dead ahead.
+# A force-null stall BETWEEN cones (cones beside the lane, nothing close in front)
+# must NOT reverse: backing up just re-enters the same symmetric minimum and walks
+# the robot backward. In that case skip the reverse and let reorient + lateral goal
+# perturbation break the symmetry instead.
+RECOVERY_REVERSE_FRONT_TRIGGER_MM = 120.0  # reverse only if front clearance is below this
 RECOVERY_MIN_REVERSE_MM = 50.0           # below this, skip the reverse entirely
 RECOVERY_REVERSE_SPEED_MM_S = 100.0      # slow, so BTN_2 polling stays responsive
 RECOVERY_REVERSE_TOLERANCE_MM = 40.0
@@ -797,8 +808,15 @@ def start_recovery(robot: Robot, av: dict, now: float):
     av["recovery_sign"] = 1 if (av["retry_count"] % 2 == 1) else -1
     av["recovery_started_at"] = now
 
+    front = front_clearance_mm(robot)
     rear = rear_clearance_mm(robot)
-    if math.isinf(rear):
+    if front > RECOVERY_REVERSE_FRONT_TRIGGER_MM:
+        # Nothing close dead ahead -> this is a force-null stall between cones,
+        # not an imminent collision. Reversing would just re-enter the same
+        # symmetric minimum and net the robot backward, so skip it entirely and
+        # rely on the reorient + lateral goal perturbation below.
+        reverse_dist = 0.0
+    elif math.isinf(rear):
         reverse_dist = RECOVERY_REVERSE_MM
     elif rear >= RECOVERY_MIN_REAR_CLEARANCE_MM:
         reverse_dist = min(RECOVERY_REVERSE_MM, rear - RECOVERY_REVERSE_MARGIN_MM)
@@ -808,7 +826,7 @@ def start_recovery(robot: Robot, av: dict, now: float):
     if reverse_dist >= RECOVERY_MIN_REVERSE_MM:
         print(
             f"[FSM] recovery {av['retry_count']}/{MAX_AVOIDANCE_RETRIES}: "
-            f"reversing {reverse_dist:.0f} mm (rear clearance="
+            f"reversing {reverse_dist:.0f} mm (front {front:.0f} mm, rear clearance="
             f"{'inf' if math.isinf(rear) else f'{rear:.0f} mm'})"
         )
         handle = robot.move_backward(
@@ -821,7 +839,8 @@ def start_recovery(robot: Robot, av: dict, now: float):
 
     print(
         f"[FSM] recovery {av['retry_count']}/{MAX_AVOIDANCE_RETRIES}: "
-        f"rear clearance {rear:.0f} mm too low - skipping reverse, reorienting only"
+        f"skipping reverse (front {front:.0f} mm, rear "
+        f"{'inf' if math.isinf(rear) else f'{rear:.0f} mm'}) - reorienting only"
     )
     handle = robot.turn_by(
         av["recovery_sign"] * RECOVERY_HEADING_OFFSET_DEG,
