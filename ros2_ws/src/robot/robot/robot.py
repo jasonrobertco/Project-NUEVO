@@ -198,7 +198,12 @@ class Robot(HardwareMixin, SensorsMixin, NavigationMixin, LegacyMixin):
     SELF_FOOTPRINT_MIN_FWD_MM:  float = -350.0  # furthest-behind edge of the box (most negative)
     SELF_FOOTPRINT_MAX_FWD_MM:  float = -100.0  # nearest-to-front edge (kept behind the axle)
     SELF_FOOTPRINT_MIN_LEFT_MM: float = -250.0  # right edge (+y = left, so min = rightmost)
-    SELF_FOOTPRINT_MAX_LEFT_MM: float =    0.0  # left edge (stops at the body centerline)
+    # Extended past the centerline to +150 to catch the left-rear structure that
+    # was leaking through as the fwd=-223, left=+91 ghost and shoving the LAPF
+    # virtual target (veer off heading). Still rear-only via the fwd box
+    # ([-350,-100]), so it cannot mask a real cone in front of / beside the robot.
+    # SELF_FOOTPRINT_MAX_LEFT_MM: float =    0.0  # ORIGINAL (revert here): left edge at body centerline
+    SELF_FOOTPRINT_MAX_LEFT_MM: float =  150.0  # left edge (covers left-rear structure: left in [-250, +150])
 
     OBSTACLE_TRACK_INPUT_RANGE_MM: float = 1200.0
     OBSTACLE_TRACK_MAX_INPUT_POINTS: int = 250

@@ -712,6 +712,9 @@ class NavigationMixin:
         force_ema_alpha: float | None = None,
         inflation_margin_mm: float | None = None,
         leash_half_angle_deg: float | None = None,
+        slow_clearance_start_mm: float = 450.0,
+        slow_clearance_stop_mm: float = 150.0,
+        min_speed_frac: float = 0.5,
         timeout: float = None,
     ) -> MotionHandle:
         """
@@ -751,6 +754,9 @@ class NavigationMixin:
         leash_half_angle_deg = float(
             self.LAPF_LEASH_HALF_ANGLE_DEG if leash_half_angle_deg is None else leash_half_angle_deg
         )
+        slow_clearance_start_mm = float(slow_clearance_start_mm)
+        slow_clearance_stop_mm = float(slow_clearance_stop_mm)
+        min_speed_frac = float(min_speed_frac)
 
         def target():
             self._nav_lapf_to_goal(
@@ -766,6 +772,9 @@ class NavigationMixin:
                 force_ema_alpha,
                 inflation_margin_mm,
                 leash_half_angle_deg,
+                slow_clearance_start_mm,
+                slow_clearance_stop_mm,
+                min_speed_frac,
             )
 
         return self._start_nav(target, blocking, timeout)
@@ -1048,6 +1057,9 @@ class NavigationMixin:
         force_ema_alpha: float,
         inflation_margin_mm: float,
         leash_half_angle_deg: float,
+        slow_clearance_start_mm: float = 450.0,
+        slow_clearance_stop_mm: float = 150.0,
+        min_speed_frac: float = 0.5,
         update_hz: float = float(DEFAULT_NAV_HZ),
     ) -> None:
         from robot.path_planner import LeashedAPFPlanner
@@ -1066,6 +1078,9 @@ class NavigationMixin:
             leash_half_angle_deg=leash_half_angle_deg,
             inflation_margin_mm=inflation_margin_mm,
             tracker_lookahead_mm=tracker_lookahead_mm,
+            slow_clearance_start_mm=slow_clearance_start_mm,
+            slow_clearance_stop_mm=slow_clearance_stop_mm,
+            min_speed_frac=min_speed_frac,
         )
         dt = 1.0 / update_hz
         fetch_radius_mm = (

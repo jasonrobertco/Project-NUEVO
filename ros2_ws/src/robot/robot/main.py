@@ -69,6 +69,18 @@ DRIVE_TOLERANCE_MM = 60.0
 TURN_TOLERANCE_DEG = 3.0
 STATUS_PRINT_INTERVAL_S = 0.5
 
+# ===========================================================================
+# TEMP / TESTING-ONLY -- skip the cp1->bridge->cp2 scripted drive.
+# When True, BTN_1 resets odometry to the cp2 start pose (0,0, heading +Y) and
+# jumps straight into the cp2->cp3 obstacle-avoidance leg, so the LiDAR/LAPF
+# weave can be tested without driving the whole scripted approach each time.
+# The robot must be physically placed at the cp2 spot facing up the obstacle
+# course (+Y) before pressing BTN_1.
+#   >>> SET BACK TO False FOR THE FULL cp1->cp5 RUN <<<  (this line)
+# When False the scripted MISSION_STEPS sequence runs unchanged.
+START_AT_CP2 = True  # TEMP: True = start at checkpoint 2 (skip scripted steps)
+# ===========================================================================
+
 # Commanded magnitude for a physical 90-degree turn. The robot overshoots a
 # raw 90.0 command by ~10 deg, so the calibrated command is reduced to land on
 # a true right angle. Tune this on the venue: if the robot still turns too far,
@@ -152,6 +164,13 @@ LAPF_ATTRACTION_GAIN = 1.0
 LAPF_FORCE_EMA_ALPHA = 0.35
 LAPF_INFLATION_MARGIN_MM = 250.0
 LAPF_LEASH_HALF_ANGLE_DEG = 50.0
+# Forward-clearance throttle (mild): ease off the throttle when a cone is close
+# dead-ahead so the steering has time to swing clear. Scales LINEAR speed only
+# (angular stays full); floors at LAPF_MIN_SPEED_FRAC so the robot always keeps
+# inching forward — never stops, pauses, or gates on the turn completing.
+LAPF_SLOW_CLEARANCE_START_MM = 450.0   # full speed when nearest cone edge ahead >= this
+LAPF_SLOW_CLEARANCE_STOP_MM = 150.0    # most-slowed (floor) by this edge clearance
+LAPF_MIN_SPEED_FRAC = 0.5              # speed floor as a fraction of OBSTACLE_AVOIDANCE_SPEED_MM_S
 
 # ---------------------------------------------------------------------------
 # LAPF stall watchdog + recovery (checkpoint 2+ obstacle-avoidance segments).
@@ -436,6 +455,9 @@ def issue_lapf(robot: Robot, label: str, goal_mm: tuple[float, float]):
         force_ema_alpha=LAPF_FORCE_EMA_ALPHA,
         inflation_margin_mm=LAPF_INFLATION_MARGIN_MM,
         leash_half_angle_deg=LAPF_LEASH_HALF_ANGLE_DEG,
+        slow_clearance_start_mm=LAPF_SLOW_CLEARANCE_START_MM,
+        slow_clearance_stop_mm=LAPF_SLOW_CLEARANCE_STOP_MM,
+        min_speed_frac=LAPF_MIN_SPEED_FRAC,
         blocking=False,
     )
 
@@ -967,14 +989,41 @@ def run(robot: Robot) -> None:
 
         elif state == "IDLE":
             if robot.was_button_pressed(Button.BTN_1):
-                reset_mission_pose(robot)
-                show_running_leds(robot)
-                step_index = 0
-                av = {}
-                motion_handle = start_step(robot, MISSION_STEPS[step_index])
-                last_status_print_at = now
-                print(f"[FSM] MOVING - started step 1/{len(MISSION_STEPS)}: {MISSION_STEPS[0].label}")
-                state = "MOVING"
+                if START_AT_CP2:
+                    # TEMP/testing-only path (START_AT_CP2): skip the scripted
+                    # cp1->bridge->cp2 steps and jump straight into the
+                    # cp2->cp3 obstacle-avoidance leg. reset_mission_pose() sets
+                    # odometry to (0,0, INITIAL_THETA_DEG=+Y), i.e. the cp2 start
+                    # pose, so begin_avoidance_segment aims the goal straight up
+                    # the obstacle course. Place the robot at the cp2 spot facing
+                    # +Y before pressing BTN_1. Set START_AT_CP2=False to restore
+                    # the full scripted run.
+                    reset_mission_pose(robot)
+                    show_running_leds(robot)
+                    step_index = len(MISSION_STEPS)
+                    av = {}
+                    print("[FSM] TEMP START_AT_CP2 - skipping scripted steps; "
+                          "starting obstacle avoidance toward checkpoint 3")
+                    motion_handle = begin_avoidance_segment(
+                        robot,
+                        av,
+                        "checkpoint 2 -> checkpoint 3 approach",
+                        CHECKPOINT_3_APPROACH_DISTANCE_MM,
+                        next_state="CP3_FACE_WALL",
+                        now=now,
+                        terminate_on_wall=True,
+                    )
+                    last_status_print_at = now
+                    state = "OBSTACLE_AVOIDANCE"
+                else:
+                    reset_mission_pose(robot)
+                    show_running_leds(robot)
+                    step_index = 0
+                    av = {}
+                    motion_handle = start_step(robot, MISSION_STEPS[step_index])
+                    last_status_print_at = now
+                    print(f"[FSM] MOVING - started step 1/{len(MISSION_STEPS)}: {MISSION_STEPS[0].label}")
+                    state = "MOVING"
 
         elif state == "MOVING":
             if robot.was_button_pressed(Button.BTN_2):

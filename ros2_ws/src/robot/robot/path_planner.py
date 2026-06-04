@@ -375,6 +375,10 @@ class LeashedAPFPlanner:
         leash_half_angle_deg: float = 60.0,
         inflation_margin_mm: float = 200.0,
         tracker_lookahead_mm: float = 150.0,
+        slow_clearance_start_mm: float = 450.0,
+        slow_clearance_stop_mm: float = 150.0,
+        min_speed_frac: float = 0.5,
+        forward_corridor_half_mm: float = 200.0,
     ) -> None:
         self._max_linear = float(max_linear)
         self._max_angular = float(max_angular)
@@ -387,6 +391,14 @@ class LeashedAPFPlanner:
         self._leash_length = float(leash_length_mm)
         self._leash_half_angle = math.radians(float(leash_half_angle_deg))
         self._inflation_margin = float(inflation_margin_mm)
+        # Forward-clearance throttle (mild slowdown near a dead-ahead obstacle so
+        # the steering has time to swing clear). Scales the LINEAR command only;
+        # angular is untouched, and the floor (min_speed_frac) keeps the robot
+        # inching forward — it never gates on the turn or pauses.
+        self._slow_start = float(slow_clearance_start_mm)
+        self._slow_stop = float(slow_clearance_stop_mm)
+        self._min_speed_frac = float(min_speed_frac)
+        self._forward_corridor_half = float(forward_corridor_half_mm)
         self._tracker = PurePursuitPlanner(
             lookahead_dist=float(tracker_lookahead_mm),
             max_angular=float(max_angular),
@@ -417,7 +429,56 @@ class LeashedAPFPlanner:
             return 0.0, 0.0
 
         target = self.update_virtual_target(pose, goal, obstacles, dt)
-        return self._tracker.compute_velocity_to_point(pose, target, self._max_linear)
+        linear, angular = self._tracker.compute_velocity_to_point(pose, target, self._max_linear)
+        linear *= self._forward_speed_scale(pose, obstacles)
+        return linear, angular
+
+    def _forward_speed_scale(
+        self,
+        pose: tuple[float, float, float],
+        obstacles: np.ndarray,
+    ) -> float:
+        """Mild linear-speed throttle based on edge-clearance to the nearest
+        obstacle dead-ahead.
+
+        Reads obstacle disks in a forward corridor (robot frame: ahead, within
+        +/- forward_corridor_half of the centerline) and returns a scale in
+        [min_speed_frac, 1.0]: full speed when the nearest such obstacle edge is
+        >= slow_start, ramping down to the floor by slow_stop. Returns 1.0 when
+        nothing is in the corridor. Linear only — the caller leaves angular at
+        full so the robot keeps turning clear while it creeps.
+        """
+        obs = np.asarray(obstacles, dtype=float)
+        if obs.ndim != 2 or obs.shape[0] == 0:
+            return 1.0
+        px, py, theta = pose
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        nearest_edge = float("inf")
+        for row in obs:
+            ox = float(row[0])
+            oy = float(row[1])
+            radius = float(row[2]) if row.shape[0] >= 3 else 0.0
+            dx = ox - px
+            dy = oy - py
+            fwd = dx * cos_t + dy * sin_t
+            if fwd <= 0.0:
+                continue
+            left = -dx * sin_t + dy * cos_t
+            if abs(left) > self._forward_corridor_half:
+                continue
+            edge = math.hypot(dx, dy) - radius
+            if edge < nearest_edge:
+                nearest_edge = edge
+        if not math.isfinite(nearest_edge):
+            return 1.0
+        span = self._slow_start - self._slow_stop
+        if span <= 1e-6:
+            t = 1.0 if nearest_edge >= self._slow_start else 0.0
+        else:
+            t = (nearest_edge - self._slow_stop) / span
+            t = max(0.0, min(1.0, t))
+        return self._min_speed_frac + (1.0 - self._min_speed_frac) * t
 
     def update_virtual_target(
         self,
