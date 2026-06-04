@@ -81,8 +81,8 @@ RIGHT_ANGLE_TURN_DEG = 82.0
 # physical bridge/ramp, not derived from the course grid. Do not change them
 # without re-tuning on the venue — the cp1/2 sequence is meant to stay
 # behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 2700.0   # start -> checkpoint 1 approach point
-BRIDGE_ALIGN_DISTANCE_MM = 600.0             # short nudge into the bridge lane
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
+BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
 BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop: short open-loop drive between the two left turns to round
 # the corner onto the obstacle course. Hand-tuned, not a course tile.
@@ -144,14 +144,14 @@ CHECKPOINT_4_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_4_STRAIGHT_TILES
 OBSTACLE_AVOIDANCE_SPEED_MM_S = 140.0
 OBSTACLE_AVOIDANCE_TOLERANCE_MM = 60.0
 OBSTACLE_AVOIDANCE_MAX_ANGULAR_RAD_S = 1.0
-LAPF_LEASH_LENGTH_MM = 400.0
+LAPF_LEASH_LENGTH_MM = 500.0
 LAPF_REPULSION_RANGE_MM = 300.0
 LAPF_TARGET_SPEED_MM_S = 200.0
 LAPF_REPULSION_GAIN = 550.0
 LAPF_ATTRACTION_GAIN = 1.0
 LAPF_FORCE_EMA_ALPHA = 0.35
-LAPF_INFLATION_MARGIN_MM = 150.0
-LAPF_LEASH_HALF_ANGLE_DEG = 25.0
+LAPF_INFLATION_MARGIN_MM = 250.0
+LAPF_LEASH_HALF_ANGLE_DEG = 50.0
 
 # ---------------------------------------------------------------------------
 # LAPF stall watchdog + recovery (checkpoint 2+ obstacle-avoidance segments).
