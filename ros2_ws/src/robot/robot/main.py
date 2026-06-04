@@ -171,12 +171,13 @@ LAPF_FORCE_EMA_ALPHA = 0.35
 # spin-in-place pivot, which is ONLY safe because inflation was dropped to 200.
 # Fix 2 geometry must hold: leash can place the virtual target outside the
 # inflated cone, i.e. reach = leash_length*sin(half_angle) >= eff_radius.
-#   reach = 500 * sin(45 deg) = 354 mm  >=  eff_radius = r_track(<=75) + 200 = 275 mm  (79 mm headroom)
+#   reach = 500 * sin(45 deg) = 354 mm  >=  eff_radius = r_track(<=75) + 230 = 305 mm  (49 mm headroom)
 #   (was 35 deg = 287 mm, 40 deg = 321 mm; widened to 45 for aggressive dead-ahead-cone dodge room)
 # >>> DO NOT narrow the leash further (or raise inflation) without re-checking
 #     this inequality, or the target gets re-trapped inside the bubble (nose-in). <<<
 # LAPF_INFLATION_MARGIN_MM = 250.0      # ORIGINAL (revert here): oversized ~325 mm keep-out
-LAPF_INFLATION_MARGIN_MM = 200.0        # ~250-275 mm keep-out; body-edge-to-cone clearance ~33-58 mm
+# LAPF_INFLATION_MARGIN_MM = 200.0      # prior: body-edge clearance ~33-58 mm -> grazed a near-side cone
+LAPF_INFLATION_MARGIN_MM = 230.0        # ~280-305 mm keep-out; body-edge-to-cone clearance ~63-88 mm
 # LAPF_LEASH_HALF_ANGLE_DEG = 50.0      # ORIGINAL (revert here): wide leash -> target far off-axis -> pivot
 # LAPF_LEASH_HALF_ANGLE_DEG = 35.0      # prior: arced but ran out of lateral room on a close dead-ahead cone
 # LAPF_LEASH_HALF_ANGLE_DEG = 40.0      # prior: +5 deg, still clipped the 3rd cone
@@ -290,8 +291,10 @@ WALL_DETECT_STANDOFF_MM = 500.0        # end the LAPF run when the wall is this 
 # below prints the exact measured advance, so dial this in from one run.
 CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM   # 4 tiles (4*610=2440 mm); end wall sits at 5 tiles
 WALL_APPROACH_TARGET_MM = 350.0        # stop this far from the wall (the re-zero)
-WALL_APPROACH_SPEED_MM_S = 80.0        # slow closed-loop approach speed
-WALL_APPROACH_TIMEOUT_S = 8.0          # watchdog for the approach drive (not under LAPF watchdog)
+# WALL_APPROACH_SPEED_MM_S = 80.0      # ORIGINAL (revert here): too slow, timed out ~640 mm short
+WALL_APPROACH_SPEED_MM_S = 150.0       # closed-loop approach speed (closes the full ~1300 mm in time)
+# WALL_APPROACH_TIMEOUT_S = 8.0        # ORIGINAL (revert here): too short to close the full distance
+WALL_APPROACH_TIMEOUT_S = 16.0         # watchdog for the approach drive (not under LAPF watchdog)
 # The standoff the turn actually fires at is variable run-to-run: the creep only
 # samples the front cone once per FSM tick and lidar returns jitter, so a single
 # noisy frame dipping to the target would otherwise commit the turn at the wrong
@@ -313,6 +316,14 @@ FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading
 # wall onto the finish straightaway. Set both on the venue.
 CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # turn to face the re-zero wall (SIGN UNVERIFIED; magnitude calibrated)
 CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish straightaway (SIGN UNVERIFIED; magnitude calibrated)
+
+# Position sanity check after the turn onto the finish straightaway: with the
+# robot squared to the wall at ~standoff then turned 90 deg right, the wall it
+# re-zeroed against should now sit ~standoff away BEHIND and to the LEFT. These
+# are a logged sanity check only -- they WARN if off but never block the drive
+# (turn SIGN is UNVERIFIED, so a flipped sign shows up here as a large/inf read).
+WALL_FINISH_SANITY_TARGET_MM = 300.0   # expected rear and left clearance after the straightaway turn
+WALL_FINISH_SANITY_BAND_MM = 120.0     # warn (don't fail) if a reading is outside target +/- this
 
 
 StepKind = Literal["move_to", "turn_by", "move_forward", "square_to_wall"]
@@ -554,6 +565,43 @@ def front_clearance_mm(
             continue
         if px < nearest:
             nearest = px
+    return nearest
+
+
+def directional_clearance_mm(
+    robot: Robot,
+    axis: str,
+    half_width_mm: float = FRONT_CONE_HALF_WIDTH_MM,
+    max_range_mm: float = FRONT_CLEARANCE_MAX_RANGE_MM,
+) -> float:
+    """Nearest raw-cloud return in a narrow body-frame cone along `axis`.
+
+    Generalizes front_clearance_mm to the rear and sides for the cp3 finish
+    position sanity check. axis is 'front' (+x), 'rear' (-x), 'left' (+y), or
+    'right' (-y); the cone runs `max_range_mm` along that axis within
+    +/- half_width_mm laterally. Same raw cloud (self-footprint excluded, robot
+    body frame: fwd=+x, left=+y) as front_clearance_mm. Returns +inf when the
+    cone is empty (e.g. wrong side / nothing there -> shows up as a warning in
+    the caller, which is informative given the unverified turn sign).
+    """
+    nearest = math.inf
+    for px, py in robot.get_obstacles():
+        if axis == "front":
+            along, lateral = px, py
+        elif axis == "rear":
+            along, lateral = -px, py
+        elif axis == "left":
+            along, lateral = py, px
+        elif axis == "right":
+            along, lateral = -py, px
+        else:
+            raise ValueError(f"directional_clearance_mm: bad axis {axis!r}")
+        if along <= 0.0 or along > max_range_mm:
+            continue
+        if abs(lateral) > half_width_mm:
+            continue
+        if along < nearest:
+            nearest = along
     return nearest
 
 
@@ -1375,6 +1423,30 @@ def run(robot: Robot) -> None:
                 print("[FSM] IDLE - cp3 straightaway verify cancelled")
                 state = "IDLE"
             else:
+                # Position sanity check (LOGGED; WARN only, never blocks). After the
+                # 90 deg right turn onto the straightaway the re-zero wall should sit
+                # ~target away BEHIND and to the LEFT. Turn SIGN is UNVERIFIED, so a
+                # flipped sign shows up here as an out-of-band / inf reading -> warn,
+                # but still defer the go/no-go to the front-clear gate below.
+                rear = directional_clearance_mm(robot, "rear")
+                left = directional_clearance_mm(robot, "left")
+                lo = WALL_FINISH_SANITY_TARGET_MM - WALL_FINISH_SANITY_BAND_MM
+                hi = WALL_FINISH_SANITY_TARGET_MM + WALL_FINISH_SANITY_BAND_MM
+                rear_str = "inf" if math.isinf(rear) else f"{rear:.0f}"
+                left_str = "inf" if math.isinf(left) else f"{left:.0f}"
+                print(
+                    f"[FSM] cp3 position check: rear={rear_str} mm left={left_str} mm "
+                    f"(want ~{WALL_FINISH_SANITY_TARGET_MM:.0f} mm each, ok {lo:.0f}-{hi:.0f} mm)"
+                )
+                for name, val in (("rear", rear), ("left", left)):
+                    if not (lo <= val <= hi):
+                        val_str = "inf" if math.isinf(val) else f"{val:.0f}"
+                        print(
+                            f"[FSM] WARN cp3 position: {name}={val_str} mm outside "
+                            f"{lo:.0f}-{hi:.0f} mm - check turn sign/standoff "
+                            "(continuing, not aborting)"
+                        )
+
                 front = front_clearance_mm(robot)
                 front_str = "inf" if math.isinf(front) else f"{front:.0f}"
                 if front >= CLEAR_PATH_MIN_MM:
@@ -1388,6 +1460,7 @@ def run(robot: Robot) -> None:
                         tolerance=DRIVE_TOLERANCE_MM,
                         blocking=False,
                     )
+                    av["drive_start_mm"] = robot.get_odometry_pose()[:2]
                     last_status_print_at = now
                     state = "CP3_DRIVE_STRAIGHTAWAY"
                 else:
@@ -1408,9 +1481,16 @@ def run(robot: Robot) -> None:
             else:
                 if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
                     x, y, theta = robot.get_odometry_pose()
+                    sx, sy = av.get("drive_start_mm", (x, y))
+                    traveled = math.hypot(x - sx, y - sy)
+                    remaining = max(0.0, CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM - traveled)
+                    front = front_clearance_mm(robot)
+                    front_str = "inf" if math.isinf(front) else f"{front:.0f}"
                     print(
-                        f"  cp3 straightaway odom=({x:6.0f}, {y:6.0f}) mm "
-                        f"theta={theta:5.1f} deg"
+                        f"  cp3 straightaway closing: remaining={remaining:5.0f} mm "
+                        f"front={front_str} mm "
+                        f"(traveled {traveled:.0f}/{CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM:.0f} mm) "
+                        f"odom=({x:6.0f}, {y:6.0f}) theta={theta:5.1f} deg"
                     )
                     last_status_print_at = now
 
