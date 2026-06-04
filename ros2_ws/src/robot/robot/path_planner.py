@@ -407,10 +407,15 @@ class LeashedAPFPlanner:
 
         self._virtual_target: tuple[float, float] | None = None
         self._force_ema: np.ndarray | None = None
+        # Committed side for the local-minimum escape (+1 = goal's left, -1 =
+        # goal's right). Set when the force nulls between obstacle clusters and
+        # held until the robot is clear, so the escape doesn't flip-flop.
+        self._committed_escape_sign: int | None = None
 
     def reset(self) -> None:
         self._virtual_target = None
         self._force_ema = None
+        self._committed_escape_sign = None
 
     def get_virtual_target(self) -> tuple[float, float] | None:
         return self._virtual_target
@@ -564,18 +569,42 @@ class LeashedAPFPlanner:
                 rep += direction * rep_mag
 
         total = attr + rep
+        total_norm = float(np.linalg.norm(total))
 
-        # APF symmetry can leave a centered obstacle with no lateral escape.
-        # Add a small deterministic tangent only when the total force is nearly
-        # singular near a blocking obstacle.
-        if nearest_obs is not None and np.linalg.norm(total) < 0.25:
-            ox, oy, _eff_radius = nearest_obs
-            away = np.array([vx - ox, vy - oy], dtype=float)
-            norm = float(np.linalg.norm(away))
-            if norm > 1e-6:
-                away /= norm
-                tangent = np.array([-away[1], away[0]], dtype=float)
-                total += 0.15 * self._attr_gain * tangent
+        # Local-minimum escape. APF symmetry can null the force between obstacle
+        # clusters (e.g. boxed between cones), leaving the virtual target with no
+        # lateral escape -> the robot spins in place. Steer the escape toward the
+        # OPEN side and COMMIT it until clear, rather than flip-flopping. The
+        # summed repulsion `rep` already points away from the denser cluster, i.e.
+        # toward the gap; its component perpendicular to the goal direction picks
+        # the open side. Committing prevents the per-tick flip that the old
+        # nearest-obstacle tangent suffered (the nearest obstacle switched between
+        # the left and right cone each tick, reversing the escape).
+        #
+        # ORIGINAL (revert here): perpendicular to the SINGLE nearest obstacle,
+        # fixed CCW rotation, no commitment -> flip-flopped and never escaped:
+        #   if nearest_obs is not None and np.linalg.norm(total) < 0.25:
+        #       ox, oy, _eff_radius = nearest_obs
+        #       away = np.array([vx - ox, vy - oy], dtype=float)
+        #       norm = float(np.linalg.norm(away))
+        #       if norm > 1e-6:
+        #           away /= norm
+        #           tangent = np.array([-away[1], away[0]], dtype=float)
+        #           total += 0.15 * self._attr_gain * tangent
+        if total_norm > 0.5:
+            # Force is healthy again -> escaped the null; drop the commitment so a
+            # stale lateral lean can't persist up an open lane (hysteresis: arm at
+            # <0.25, release at >0.5).
+            self._committed_escape_sign = None
+        elif nearest_obs is not None and total_norm < 0.25 and goal_dist > 1e-6:
+            goal_dir = goal_vec / goal_dist
+            # perp = goal_dir rotated +90 deg (goal's left). +rep.perp => left open.
+            perp = np.array([-goal_dir[1], goal_dir[0]], dtype=float)
+            if self._committed_escape_sign is None:
+                rep_side = float(np.dot(rep, perp))
+                self._committed_escape_sign = 1 if rep_side >= 0.0 else -1
+            tangent = self._committed_escape_sign * perp
+            total += 0.15 * self._attr_gain * tangent
 
         return total
 
