@@ -293,7 +293,8 @@ WALL_DETECT_STANDOFF_MM = 500.0        # end the LAPF run when the wall is this 
 # below prints the exact measured advance, so dial this in from one run.
 CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM   # 4 tiles (4*610=2440 mm); end wall sits at 5 tiles
 # WALL_APPROACH_TARGET_MM = 350.0      # ORIGINAL (revert here): stopped 75 mm closer
-WALL_APPROACH_TARGET_MM = 425.0        # stop this far from the wall (the re-zero); +75 mm backoff
+# WALL_APPROACH_TARGET_MM = 425.0      # prior: still a little too close to wall 1
+WALL_APPROACH_TARGET_MM = 475.0        # stop this far from the wall (re-zero); +125 mm total backoff (both walls)
 # WALL_APPROACH_SPEED_MM_S = 80.0      # ORIGINAL (revert here): too slow, timed out ~640 mm short
 WALL_APPROACH_SPEED_MM_S = 150.0       # closed-loop approach speed (closes the full ~1300 mm in time)
 # WALL_APPROACH_TIMEOUT_S = 8.0        # ORIGINAL (revert here): too short to close the full distance
@@ -330,9 +331,10 @@ CP3_GAP_ADVANCE_DISTANCE_MM = 610.0    # ~1 course tile, open-loop forward move 
 # re-zeroed against should now sit ~standoff away BEHIND and to the LEFT. These
 # are a logged sanity check only -- they WARN if off but never block the drive
 # (turn SIGN is UNVERIFIED, so a flipped sign shows up here as a large/inf read).
-# WALL_FINISH_SANITY_TARGET_MM = 300.0 # ORIGINAL (revert here): tripped spuriously once the standoff went to 425
-WALL_FINISH_SANITY_TARGET_MM = 425.0   # expected rear/left clearance after the final turn (= the 425 mm standoff)
-WALL_FINISH_SANITY_BAND_MM = 120.0     # warn (don't fail) if a reading is outside target +/- this (ok 305-545 mm)
+# WALL_FINISH_SANITY_TARGET_MM = 300.0 # ORIGINAL (revert here): tripped spuriously once the standoff went up
+# WALL_FINISH_SANITY_TARGET_MM = 425.0 # prior: tracked the 425 standoff
+WALL_FINISH_SANITY_TARGET_MM = 475.0   # expected rear/left clearance after the final turn (= the 475 mm standoff)
+WALL_FINISH_SANITY_BAND_MM = 120.0     # warn (don't fail) if a reading is outside target +/- this (ok 355-595 mm)
 
 # Finish-straightaway wall-following self-correction. While driving the cp3
 # straightaway, steer gently toward whichever side wall has MORE room so the
@@ -1348,8 +1350,9 @@ def run(robot: Robot) -> None:
 
         elif state == "CP3_APPROACH_WALL":
             # Closed-loop creep toward the wall until the front cone reads the
-            # target standoff. Velocity-controlled (no MotionHandle), so this
-            # state carries its OWN timeout — it is not under the LAPF watchdog.
+            # target standoff. Velocity-controlled (no MotionHandle). Timeout
+            # DISABLED (see below) per request: it keeps creeping until the wall
+            # appears and the standoff is reached; BTN_2 is the only stop.
             if robot.was_button_pressed(Button.BTN_2):
                 robot.stop()
                 motion_handle = None
@@ -1394,14 +1397,20 @@ def run(robot: Robot) -> None:
                         )
                         last_status_print_at = now
                         state = "CP3_FACE_STRAIGHTAWAY"
-                elif (now - av["wall_approach_started_at"]) >= WALL_APPROACH_TIMEOUT_S:
-                    safe_stop_to_idle(
-                        robot,
-                        "cp3 wall approach timed out - front never settled in the "
-                        f"{in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm range "
-                        "(check detection / standoffs / turn sign)",
-                    )
-                    state = "IDLE"
+                # TIMEOUT DISABLED per request ("get rid of the timeout timer"): the
+                # approach no longer safe-stops if the wall takes a while to appear; it
+                # keeps creeping (incl. the inf case below) until it reaches the standoff.
+                # BTN_2 is the only stop now. Re-enable by uncommenting this branch AND
+                # restoring the inf-case hold below (WALL_APPROACH_TIMEOUT_S still defined).
+                # ORIGINAL (revert here):
+                # elif (now - av["wall_approach_started_at"]) >= WALL_APPROACH_TIMEOUT_S:
+                #     safe_stop_to_idle(
+                #         robot,
+                #         "cp3 wall approach timed out - front never settled in the "
+                #         f"{in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm range "
+                #         "(check detection / standoffs / turn sign)",
+                #     )
+                #     state = "IDLE"
                 elif math.isfinite(front) and front < in_lower:
                     # Nearer than the band's lower edge: too close to creep further.
                     # Hold and keep sampling - jitter may settle back into range; if it
@@ -1414,10 +1423,15 @@ def run(robot: Robot) -> None:
                     av["wall_inrange_count"] = 0
                     robot.set_velocity(WALL_APPROACH_SPEED_MM_S, 0.0)
                 else:
-                    # Wall not in the forward cone - hold rather than drive blind;
-                    # the timeout above will flag it.
+                    # Wall not in the forward cone yet: KEEP GOING (creep forward) so
+                    # it closes the gap until the wall comes into range, instead of
+                    # holding. This is what was freezing the wall-2 approach (front=inf).
+                    # ORIGINAL (revert here): held in place until the (now-disabled)
+                    # timeout fired:
+                    #   av["wall_inrange_count"] = 0
+                    #   robot.stop()
                     av["wall_inrange_count"] = 0
-                    robot.stop()
+                    robot.set_velocity(WALL_APPROACH_SPEED_MM_S, 0.0)
 
         elif state == "CP3_FACE_STRAIGHTAWAY":
             # Post-wall turn (turn started on entry). After wall 1 this turn faces
