@@ -78,7 +78,7 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # course (+Y) before pressing BTN_1.
 #   >>> SET BACK TO False FOR THE FULL cp1->cp5 RUN <<<  (this line)
 # When False the scripted MISSION_STEPS sequence runs unchanged.
-START_AT_CP2 = True  # TEMP: True = start at checkpoint 2 (skip scripted steps)
+START_AT_CP2 = False  # TEMP: True = start at checkpoint 2 (skip scripted steps)
 # ===========================================================================
 
 # Commanded magnitude for a physical 90-degree turn. The robot overshoots a
@@ -294,7 +294,7 @@ WALL_DETECT_STANDOFF_MM = 500.0        # end the LAPF run when the wall is this 
 CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM   # 4 tiles (4*610=2440 mm); end wall sits at 5 tiles
 # WALL_APPROACH_TARGET_MM = 350.0      # ORIGINAL (revert here): stopped 75 mm closer
 # WALL_APPROACH_TARGET_MM = 425.0      # prior: still a little too close to wall 1
-WALL_APPROACH_TARGET_MM = 475.0        # stop this far from the wall (re-zero); +125 mm total backoff (both walls)
+WALL_APPROACH_TARGET_MM = 575.0        # stop this far from the wall (re-zero); +100 mm more backoff than before (now +225 mm total vs the original 350 mm; both walls)
 # WALL_APPROACH_SPEED_MM_S = 80.0      # ORIGINAL (revert here): too slow, timed out ~640 mm short
 WALL_APPROACH_SPEED_MM_S = 150.0       # closed-loop approach speed (closes the full ~1300 mm in time)
 # WALL_APPROACH_TIMEOUT_S = 8.0        # ORIGINAL (revert here): too short to close the full distance
@@ -333,7 +333,7 @@ CP3_GAP_ADVANCE_DISTANCE_MM = 610.0    # ~1 course tile, open-loop forward move 
 # (turn SIGN is UNVERIFIED, so a flipped sign shows up here as a large/inf read).
 # WALL_FINISH_SANITY_TARGET_MM = 300.0 # ORIGINAL (revert here): tripped spuriously once the standoff went up
 # WALL_FINISH_SANITY_TARGET_MM = 425.0 # prior: tracked the 425 standoff
-WALL_FINISH_SANITY_TARGET_MM = 475.0   # expected rear/left clearance after the final turn (= the 475 mm standoff)
+WALL_FINISH_SANITY_TARGET_MM = 575.0   # expected rear/left clearance after the final turn (= the 575 mm standoff)
 WALL_FINISH_SANITY_BAND_MM = 120.0     # warn (don't fail) if a reading is outside target +/- this (ok 355-595 mm)
 
 # Finish-straightaway wall-following self-correction. While driving the cp3
@@ -346,6 +346,35 @@ WALL_FINISH_SANITY_BAND_MM = 120.0     # warn (don't fail) if a reading is outsi
 CP3_STRAIGHTAWAY_CORRECTION_SIGN = 1               # flip to -1 if it corrects the wrong way
 CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM = 0.05   # deg/s of yaw per mm of left-right imbalance
 CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S = 15.0       # cap on the yaw correction (gentle, no oscillation)
+
+# ---------------------------------------------------------------------------
+# Checkpoint 3 -> checkpoint 4: simple constant-velocity forward drive down a
+# walled lane (NO LAPF — this leg is a straight corridor, not a cone field).
+# Forward speed (DRIVE_VELOCITY_MM_S) is commanded UNCONDITIONALLY every tick and
+# is never reduced, gated on clearance, or frozen; the side walls ONLY produce a
+# heading correction (reusing the CP3 straightaway centering sign/gain/cap above).
+#
+# Lane geometry drives the single-vs-two-wall switch: at the cp3 start there is a
+# wall on the LEFT only; after ~1 tile a RIGHT wall appears and it becomes a
+# two-sided lane. The correction mode auto-switches on what is currently visible:
+#   both walls visible -> center between them (steer toward the side with more room)
+#   one wall visible   -> hold CP4_WALL_FOLLOW_TARGET_MM standoff off that wall
+#   no wall visible     -> zero correction, drive straight
+# The single-wall target is half a course tile, so the standoff it holds matches
+# the centered position — the one-wall -> two-wall handoff is then seamless.
+CP4_WALL_FOLLOW_TARGET_MM = COURSE_TILE_MM / 2.0   # 305 mm — half-tile standoff off a single wall
+
+# --- cp3->cp4 self-healing steering-sign check (STEERING term ONLY) ---------
+# CP3_STRAIGHTAWAY_CORRECTION_SIGN is UNVERIFIED. If it is backwards the wall
+# correction steers INTO a wall (worst on a single wall). CP4_DRIVE_STRAIGHT
+# applies an EFFECTIVE sign held in av["cp4_corr_sign"] and flips it ONCE at
+# runtime when the correction is clearly making things worse. These thresholds
+# only ever change the angular term — forward speed is never gated by them.
+CP4_WALL_NEAR_FLIP_MM = 150.0          # single-wall: followed wall this close AND still closing -> flip now
+CP4_CORR_FLIP_MAX = 1                  # max auto-flips per run (1 corrects a wrong constant without oscillating)
+CP4_ERR_DEADBAND_MM = 40.0             # ignore |error| below this (sensor noise, not real divergence)
+CP4_DIVERGENCE_WINDOW_S = 1.5          # |error| must grow steadily for this long before a divergence flip
+CP4_DIVERGENCE_GROWTH_MM = 30.0        # ...and grow at least this much over the window (rejects a flat/noisy plateau)
 
 
 StepKind = Literal["move_to", "turn_by", "move_forward", "square_to_wall"]
@@ -1587,18 +1616,25 @@ def run(robot: Robot) -> None:
                     robot.stop()
                     print(
                         f"[FSM] CHECKPOINT 3 reached (drove {traveled:.0f} mm) - "
-                        "starting checkpoint 4 obstacle avoidance"
+                        "driving straight to checkpoint 4 (velocity loop, no LAPF)"
                     )
-                    motion_handle = begin_avoidance_segment(
-                        robot,
-                        av,
-                        "checkpoint 3 -> checkpoint 4",
-                        CHECKPOINT_4_DISTANCE_MM,
-                        next_state="CHECKPOINT_5_MANIPULATOR",
-                        now=now,
-                    )
+                    # cp3 -> cp4 is a straight walled corridor, not a cone field, so
+                    # it runs as a plain constant-velocity forward drive
+                    # (CP4_DRIVE_STRAIGHT) instead of LAPF — nothing there can
+                    # stop/throttle/freeze forward motion. Record the odometry start
+                    # so the drive can terminate on distance.
+                    motion_handle = None
+                    av["cp4_start_mm"] = robot.get_odometry_pose()[:2]
+                    # Self-healing steering-sign state (see CP4_DRIVE_STRAIGHT):
+                    # start from the unverified constant; auto-flip at most
+                    # CP4_CORR_FLIP_MAX times if it steers into a wall.
+                    av["cp4_corr_sign"] = CP3_STRAIGHTAWAY_CORRECTION_SIGN
+                    av["cp4_flip_count"] = 0
+                    av["cp4_div_start_at"] = None
+                    av["cp4_div_start_err"] = 0.0
+                    av["cp4_prev_followed_mm"] = math.inf
                     last_status_print_at = now
-                    state = "OBSTACLE_AVOIDANCE"
+                    state = "CP4_DRIVE_STRAIGHT"
                 else:
                     left = directional_clearance_mm(robot, "left")
                     right = directional_clearance_mm(robot, "right")
@@ -1632,6 +1668,129 @@ def run(robot: Robot) -> None:
                             f"left={left_str} right={right_str} behind={behind_str} mm "
                             f"err(L-R)={err_str} mm corr={correction:+.1f} deg/s "
                             f"(traveled {traveled:.0f}/{CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM:.0f})"
+                        )
+                        last_status_print_at = now
+
+        elif state == "CP4_DRIVE_STRAIGHT":
+            # cp3 -> cp4: UNCONDITIONAL constant-velocity forward drive down the
+            # walled lane. DRIVE_VELOCITY_MM_S is commanded EVERY tick and is never
+            # reduced, gated on clearance, or frozen — the side walls only produce a
+            # heading correction. No LAPF / watchdog / recovery here, so nothing but
+            # BTN_2 or reaching CHECKPOINT_4_DISTANCE_MM can stop forward progress.
+            # Correction mode auto-switches with the lane geometry (LEFT-only wall at
+            # the start -> two-sided lane after ~1 tile): both walls -> center; one
+            # wall -> hold CP4_WALL_FOLLOW_TARGET_MM standoff; no wall -> straight.
+            if robot.was_button_pressed(Button.BTN_2):
+                robot.stop()
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - cp4 straight drive cancelled")
+                state = "IDLE"
+            else:
+                x, y, theta = robot.get_odometry_pose()
+                sx, sy = av.get("cp4_start_mm", (x, y))
+                traveled = math.hypot(x - sx, y - sy)
+                remaining = CHECKPOINT_4_DISTANCE_MM - traveled
+
+                if remaining <= 0.0:
+                    robot.stop()
+                    print(
+                        f"[FSM] CHECKPOINT 4 reached (drove {traveled:.0f} mm) - "
+                        "stopping before checkpoint 5"
+                    )
+                    motion_handle = None
+                    state = "CHECKPOINT_5_MANIPULATOR"
+                else:
+                    left = directional_clearance_mm(robot, "left")
+                    right = directional_clearance_mm(robot, "right")
+                    left_seen = math.isfinite(left)
+                    right_seen = math.isfinite(right)
+                    # Build the steering error so positive ALWAYS means "steer left",
+                    # matching the two-wall centering sign (left - right). Single-wall
+                    # follow holds CP4_WALL_FOLLOW_TARGET_MM: drifting away from the
+                    # visible wall (clearance > target) steers back toward it.
+                    if left_seen and right_seen:
+                        mode = "center"
+                        error = left - right                      # >0: more room left  -> steer left
+                    elif left_seen:
+                        mode = "follow-left"
+                        error = left - CP4_WALL_FOLLOW_TARGET_MM   # left gap too big    -> steer left
+                    elif right_seen:
+                        mode = "follow-right"
+                        error = CP4_WALL_FOLLOW_TARGET_MM - right  # right gap too big   -> steer right
+                    else:
+                        mode = "straight"
+                        error = 0.0
+
+                    # --- Self-healing sign check (STEERING term ONLY) ---------
+                    # The applied sign lives in av["cp4_corr_sign"] (seeded from the
+                    # UNVERIFIED constant). Flip it ONCE if the correction is clearly
+                    # making things worse. This only ever changes the steering
+                    # direction; the forward command below is never affected.
+                    abs_err = abs(error)
+                    followed = left if mode == "follow-left" else (right if mode == "follow-right" else None)
+                    flip_reason = ""
+                    if av["cp4_flip_count"] < CP4_CORR_FLIP_MAX:
+                        if (followed is not None
+                                and followed <= CP4_WALL_NEAR_FLIP_MM
+                                and followed < av["cp4_prev_followed_mm"]):
+                            # (b) Single-wall follow: followed wall is near AND still
+                            # closing -> immediate, strong evidence the sign is wrong.
+                            flip_reason = (
+                                f"followed wall {followed:.0f} mm <= {CP4_WALL_NEAR_FLIP_MM:.0f} mm and closing"
+                            )
+                        elif abs_err > CP4_ERR_DEADBAND_MM:
+                            # (a) Sustained divergence: |error| growing steadily past
+                            # the window while a meaningful correction is applied. An
+                            # improving error (gap shrinking) restarts the streak, so
+                            # a correct sign never trips this.
+                            if (av["cp4_div_start_at"] is None
+                                    or abs_err <= av["cp4_div_start_err"] - CP4_ERR_DEADBAND_MM):
+                                av["cp4_div_start_at"] = now
+                                av["cp4_div_start_err"] = abs_err
+                            elif ((now - av["cp4_div_start_at"]) >= CP4_DIVERGENCE_WINDOW_S
+                                    and (abs_err - av["cp4_div_start_err"]) >= CP4_DIVERGENCE_GROWTH_MM):
+                                flip_reason = (
+                                    f"|err| grew {av['cp4_div_start_err']:.0f}->{abs_err:.0f} mm "
+                                    f"over >={CP4_DIVERGENCE_WINDOW_S:.1f} s"
+                                )
+                        else:
+                            # Error within the deadband -> tracking fine, clear streak.
+                            av["cp4_div_start_at"] = None
+
+                    if flip_reason:
+                        av["cp4_corr_sign"] = -av["cp4_corr_sign"]
+                        av["cp4_flip_count"] += 1
+                        av["cp4_div_start_at"] = None      # re-evaluate fresh after the flip
+                        print(
+                            f"[FSM] cp4 steering sign auto-flipped to {av['cp4_corr_sign']:+d} "
+                            f"(flip {av['cp4_flip_count']}/{CP4_CORR_FLIP_MAX}, mode={mode}): {flip_reason}"
+                        )
+
+                    av["cp4_prev_followed_mm"] = followed if followed is not None else math.inf
+
+                    correction = (
+                        av["cp4_corr_sign"]
+                        * CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM
+                        * error
+                    )
+                    correction = max(
+                        -CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S,
+                        min(CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S, correction),
+                    )
+                    # Forward speed is UNCONDITIONAL: commanded every tick regardless
+                    # of clearance or sign state. Only the angular term ever changes.
+                    robot.set_velocity(DRIVE_VELOCITY_MM_S, correction)
+
+                    if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                        left_str = "inf" if math.isinf(left) else f"{left:.0f}"
+                        right_str = "inf" if math.isinf(right) else f"{right:.0f}"
+                        print(
+                            f"  cp4 straight: remaining={remaining:5.0f} mm "
+                            f"left={left_str} right={right_str} mm mode={mode} "
+                            f"corr={correction:+.1f} deg/s sign={av['cp4_corr_sign']:+d} "
+                            f"flips={av['cp4_flip_count']}/{CP4_CORR_FLIP_MAX} "
+                            f"(traveled {traveled:.0f}/{CHECKPOINT_4_DISTANCE_MM:.0f})"
                         )
                         last_status_print_at = now
 
