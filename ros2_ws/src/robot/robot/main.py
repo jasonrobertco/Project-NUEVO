@@ -162,15 +162,28 @@ LAPF_TARGET_SPEED_MM_S = 200.0
 LAPF_REPULSION_GAIN = 550.0
 LAPF_ATTRACTION_GAIN = 1.0
 LAPF_FORCE_EMA_ALPHA = 0.35
-LAPF_INFLATION_MARGIN_MM = 250.0
-LAPF_LEASH_HALF_ANGLE_DEG = 50.0
-# Forward-clearance throttle (mild): ease off the throttle when a cone is close
-# dead-ahead so the steering has time to swing clear. Scales LINEAR speed only
-# (angular stays full); floors at LAPF_MIN_SPEED_FRAC so the robot always keeps
-# inching forward — never stops, pauses, or gates on the turn completing.
+# --- Right-sized cone keep-out + arc-not-pivot tuning (applied together; COUPLED) ---
+# These three move as a set. The leash was narrowed to 35 deg to stop the
+# spin-in-place pivot, which is ONLY safe because inflation was dropped to 200.
+# Fix 2 geometry must hold: leash can place the virtual target outside the
+# inflated cone, i.e. reach = leash_length*sin(half_angle) >= eff_radius.
+#   reach = 500 * sin(35 deg) = 287 mm  >=  eff_radius = r_track(<=75) + 200 = 275 mm  (12 mm headroom)
+# >>> DO NOT narrow the leash further (or raise inflation) without re-checking
+#     this inequality, or the target gets re-trapped inside the bubble (nose-in). <<<
+# LAPF_INFLATION_MARGIN_MM = 250.0      # ORIGINAL (revert here): oversized ~325 mm keep-out
+LAPF_INFLATION_MARGIN_MM = 200.0        # ~250-275 mm keep-out; body-edge-to-cone clearance ~33-58 mm
+# LAPF_LEASH_HALF_ANGLE_DEG = 50.0      # ORIGINAL (revert here): wide leash -> target far off-axis -> pivot
+LAPF_LEASH_HALF_ANGLE_DEG = 35.0        # caps target bearing -> pure-pursuit keeps forward speed -> arcs
+# Forward-clearance throttle (Fix 3): ease off the throttle when a cone is close
+# dead-ahead. Scales LINEAR speed only (angular untouched). NEUTRALIZED: with the
+# right-sized inflation + narrower leash the planner already routes a clean arc,
+# and throttling linear mid-turn (angular stays full) tightened the radius into a
+# pivot -- the forward motion is what carries the robot around the cone. Floor set
+# to 1.0 = no throttle. Code left intact; lower the floor below 1.0 to re-enable.
 LAPF_SLOW_CLEARANCE_START_MM = 450.0   # full speed when nearest cone edge ahead >= this
 LAPF_SLOW_CLEARANCE_STOP_MM = 150.0    # most-slowed (floor) by this edge clearance
-LAPF_MIN_SPEED_FRAC = 0.5              # speed floor as a fraction of OBSTACLE_AVOIDANCE_SPEED_MM_S
+# LAPF_MIN_SPEED_FRAC = 0.5            # ORIGINAL (revert here): mild throttle, floored at half speed
+LAPF_MIN_SPEED_FRAC = 1.0              # NEUTRALIZED: 1.0 = no forward throttle (Fix 3 off, code intact)
 
 # ---------------------------------------------------------------------------
 # LAPF stall watchdog + recovery (checkpoint 2+ obstacle-avoidance segments).
