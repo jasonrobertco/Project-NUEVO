@@ -50,7 +50,7 @@ def main(args=None) -> None:
 
     try:
         # from robot.main import run
-        from robot.main import run
+        from ros2_ws.src.robot.robot.mainMANIP import run
         run(node.robot)
     except KeyboardInterrupt:
         _safe_log(node, "info", "robot node interrupted; shutting down")
