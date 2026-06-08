@@ -95,7 +95,7 @@ RIGHT_ANGLE_TURN_DEG = 82.0
 # behaviorally fixed.
 CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 2200.0            # length of the bridge/ramp crossing
+BRIDGE_CROSS_DISTANCE_MM = 2350.0            # length of the bridge/ramp crossing
 # Post-bridge exit hop: short open-loop drive between the two left turns to round
 # the corner onto the obstacle course. Hand-tuned, not a course tile.
 BRIDGE_EXIT_DISTANCE_MM = 600.0
