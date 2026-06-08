@@ -1,36 +1,27 @@
 """
-main.py - checkpoint 2 bridge mission
+main.py - checkpoint 1->5 mission FSM
 =====================================
-Press BTN_1 to start the route. BTN_2 cancels the active motion.
+CONTROLS: BTN_1 starts the route from IDLE. BTN_2 cancels any active motion
+(including mid-recovery) and returns to IDLE.
 
-The robot follows a short odometry-only sequence to checkpoint 2, then switches
-to LiDAR/LAPF obstacle avoidance for the later checkpoint sections.
+Route -- an odometry-only scripted drive to checkpoint 2, then LiDAR/LAPF
+obstacle avoidance for the later sections:
 
-1. drive forward to the checkpoint 1 approach point
-2. turn right 90 degrees
-3. drive forward a short amount
-4. turn right 90 degrees
-5. drive forward across the bridge/ramp
-6. turn left 90 degrees
-7. drive past the bridge exit toward the obstacle section
-8. turn left 90 degrees toward the obstacle course
-9. obstacle-avoid up the field (LAPF, watchdog + recovery), ending when the
-   outer course wall is detected within standoff ahead
-10. square up to the outer wall and approach it to a fixed standoff (re-zero
-    against an absolute reference instead of a drifted odometry coordinate)
-11. turn onto the checkpoint-3 finish straightaway
-12. verify the straightaway is clear, then drive it -> checkpoint 3 reached
-13. obstacle-avoid straight 5 course tiles to checkpoint 4, then stop (LAPF)
-14. checkpoint 5 manipulator placeholder (scaffold only)
+  CP1/CP2 (scripted, odometry only):
+    drive -> turn R -> drive -> turn R           (cp1: facing the bridge mouth)
+    square to bridge axis -> cross bridge ->
+    turn L -> drive -> turn L                     (cp2: facing the cones)
+  CP3 (LiDAR): obstacle-avoid up the field (LAPF), square to the outer wall and
+    approach a fixed standoff (re-zero vs an absolute reference, not drifted
+    odometry), turn onto the finish straightaway, verify it is clear, drive it.
+  CP4 (LiDAR): obstacle-avoid straight 5 tiles, then stop.
+  CP5: manipulator placeholder (scaffold only).
 
-LAPF watchdog/recovery (steps 9 & 13):
-    A LAPF segment can stall in an APF local minimum (attraction ~= repulsion)
-    or get boxed in; the planner loop only ends on goal-or-cancel, so without a
-    watchdog the FSM would hang forever. Each segment is monitored by a
-    no-progress detector (authoritative) and a per-attempt wall-clock cap
-    (last resort). On a stall the FSM runs a bounded, symmetry-breaking,
-    rear-guarded back-up-and-retry; after the retry budget it safe-stops to
-    IDLE. BTN_2 cleanly cancels at every point, including mid-recovery.
+LAPF watchdog/recovery (cp3 & cp4): a LAPF segment can stall in a local minimum,
+and the planner loop only ends on goal-or-cancel, so each segment is watched by
+a no-progress detector (authoritative) plus a wall-clock cap (last resort). On a
+stall the FSM runs a bounded, symmetry-breaking, rear-guarded back-up-and-retry,
+then safe-stops to IDLE once the retry budget is spent.
 """
 
 from __future__ import annotations
@@ -58,64 +49,55 @@ from robot.hardware_map import (
 from robot.robot import FirmwareState, Robot
 
 
-# Preserved from working28/main28backup behavior.
+# ===========================================================================
+# CONTROLS & DRIVE BASICS
+# ===========================================================================
+# Wheel/motor wiring (preserved from working28/main28backup behavior).
 LEFT_WHEEL_MOTOR = 2
 LEFT_WHEEL_DIR_INVERTED = True
 RIGHT_WHEEL_MOTOR = 1
 RIGHT_WHEEL_DIR_INVERTED = False
 
+# Default scripted-drive speeds/tolerances.
 DRIVE_VELOCITY_MM_S = 140.0
 DRIVE_TOLERANCE_MM = 60.0
 TURN_TOLERANCE_DEG = 3.0
 STATUS_PRINT_INTERVAL_S = 0.5
 
-# ===========================================================================
-# TEMP / TESTING-ONLY -- skip the cp1->bridge->cp2 scripted drive.
-# When True, BTN_1 resets odometry to the cp2 start pose (0,0, heading +Y) and
-# jumps straight into the cp2->cp3 obstacle-avoidance leg, so the LiDAR/LAPF
-# weave can be tested without driving the whole scripted approach each time.
-# The robot must be physically placed at the cp2 spot facing up the obstacle
-# course (+Y) before pressing BTN_1.
-#   >>> SET BACK TO False FOR THE FULL cp1->cp5 RUN <<<  (this line)
-# When False the scripted MISSION_STEPS sequence runs unchanged.
-START_AT_CP2 = False  # TEMP: True = start at checkpoint 2 (skip scripted steps)
-# ===========================================================================
+# TEMP / TESTING-ONLY: True skips the cp1->bridge->cp2 scripted drive -- BTN_1
+# resets odometry to the cp2 start pose (0,0, +Y) and jumps straight into the
+# cp2->cp3 leg, so the LiDAR weave can be tested without the full approach.
+# Place the robot at the cp2 spot facing +Y first.  >>> False for a full run <<<
+START_AT_CP2 = False
 
-# Commanded magnitude for a physical 90-degree turn. The robot overshoots a
-# raw 90.0 command by ~10 deg, so the calibrated command is reduced to land on
-# a true right angle. Tune this on the venue: if the robot still turns too far,
-# lower it; if it falls short, raise it. All scripted right-angle turns
-# (cp1/2 sequence and the cp3 terminal turns) reference this so there is one
-# knob to adjust.
+# Calibrated command for a physical 90-deg turn: a raw 90.0 overshoots by ~10
+# deg, so this is reduced to land on a true right angle. One knob for ALL
+# scripted right-angle turns (cp1/2 sequence + cp3 terminal turns) -- lower if
+# it still turns too far, raise if it falls short.
 RIGHT_ANGLE_TURN_DEG = 82.0
 
-# Checkpoint 1/2 scripted distances. These are EMPIRICALLY HAND-TUNED on the
-# physical bridge/ramp, not derived from the course grid. Do not change them
-# without re-tuning on the venue — the cp1/2 sequence is meant to stay
-# behaviorally fixed.
+# ===========================================================================
+# CHECKPOINT 1 & 2 LOGIC  (scripted approach + bridge crossing, odometry only)
+# ===========================================================================
+# Scripted distances -- EMPIRICALLY HAND-TUNED on the physical bridge/ramp, not
+# derived from the course grid. Don't change without re-tuning on the venue; the
+# cp1/2 sequence is meant to stay behaviorally fixed.
 CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
 BRIDGE_CROSS_DISTANCE_MM = 2350.0            # length of the bridge/ramp crossing
-# Post-bridge exit hop: short open-loop drive between the two left turns to round
-# the corner onto the obstacle course. Hand-tuned, not a course tile.
-BRIDGE_EXIT_DISTANCE_MM = 600.0
+BRIDGE_EXIT_DISTANCE_MM = 600.0              # post-bridge corner hop (hand-tuned, not a tile)
 
 # --- Bridge-entry wall-square correction -----------------------------------
-# The bridge is crossed open-loop on odometry over a long distance, so any
-# heading error left by the two preceding 90-degree turns becomes a large
-# lateral deviation (deviation ~= BRIDGE_CROSS_DISTANCE_MM * sin(theta_err)).
-# Right after the 2nd turn the LiDAR sees both SIDE walls of the bridge lane,
-# each running parallel to the crossing. We fit a line to each side and turn to
-# null the heading error (the side walls' tilt off the robot's forward axis)
-# before committing to the crossing. The wall standoff is auto-detected per
-# side, so no measured distance is needed. This corrects HEADING only, not
-# lateral offset.
+# The bridge is crossed open-loop over a long distance, so heading error from
+# the two preceding turns becomes a large lateral deviation (~= cross_dist *
+# sin(theta_err)). After the 2nd turn the LiDAR sees both SIDE walls of the lane
+# (parallel to the crossing); we fit each and turn to null their tilt off the
+# forward axis. Standoff is auto-detected, so no measured distance is needed.
+# Corrects HEADING only, not lateral offset.
 #
-# The correction SIGN is UNVERIFIED (same caveat as the scripted turns) —
-# bench-test the direction before trusting it on the bridge. The correction is
-# deliberately conservative: it does NOTHING (no turn) whenever the scan is
-# ambiguous (no usable side wall, left/right disagree, or fit too large), so a
-# noisy read cannot make the crossing worse.
+# SIGN is UNVERIFIED -- bench-test before trusting it. Deliberately conservative:
+# does NOTHING when the scan is ambiguous (no usable wall, L/R disagree, or fit
+# too large), so a noisy read can't make the crossing worse.
 BRIDGE_SQUARE_ENABLED = True
 BRIDGE_SQUARE_DEBUG = True                 # dump the per-sector scan at square-up (tuning aid)
 BRIDGE_WALL_BAND_MM = 250.0               # keep points within +/- this of the auto-detected standoff
@@ -125,8 +107,10 @@ BRIDGE_SQUARE_DEADBAND_DEG = 1.5          # below this error, don't bother turni
 BRIDGE_SQUARE_MAX_CORRECTION_DEG = 15.0   # refuse larger corrections (guards a bad fit)
 BRIDGE_SQUARE_CROSSCHECK_DEG = 6.0        # left vs right estimates must agree within this
 
-# Checkpoint 2 and later obstacle-avoidance course sections.
-# The UI/course grid uses 610 mm cells (see WorldCanvas.tsx / vm_demo.py).
+# ===========================================================================
+# CHECKPOINT 3 & 4 LOGIC  (LiDAR / LAPF obstacle avoidance)
+# ===========================================================================
+# Course distances. The UI/course grid uses 610 mm cells (WorldCanvas.tsx).
 COURSE_TILE_MM = 610.0
 CHECKPOINT_3_APPROACH_TILES = 5.0
 CHECKPOINT_3_FINAL_STRAIGHT_TILES = 1.0
@@ -138,23 +122,17 @@ CHECKPOINT_3_APPROACH_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_APPROACH_TILES
 CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = 2525.0  # 2600 to the checkpoint, -75 mm backoff from the end wall
 CHECKPOINT_4_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_4_STRAIGHT_TILES
 
-# LAPF tuning for the checkpoint 2+ obstacle-avoidance runs:
-# - OBSTACLE_AVOIDANCE_SPEED_MM_S: lower if the robot reacts too late or slips.
-# - OBSTACLE_AVOIDANCE_TOLERANCE_MM: larger accepts a looser checkpoint arrival.
-# - LAPF_LEASH_LENGTH_MM: how far the virtual target can run ahead of the robot.
-#   Smaller is more cautious; larger is smoother but can cut closer to cones.
-# - LAPF_REPULSION_RANGE_MM: how early tracked obstacles affect the virtual target.
-#   Increase if avoidance starts too late; decrease if it swerves too early.
-# - LAPF_TARGET_SPEED_MM_S: virtual-target motion speed. Lower damps aggressive
-#   target motion; higher lets the virtual target move around obstacles faster.
-# - LAPF_REPULSION_GAIN: obstacle push strength. Increase if it clips obstacles;
-#   decrease if it overreacts or oscillates.
-# - LAPF_FORCE_EMA_ALPHA: force smoothing. Lower is smoother/slower to react;
-#   higher follows the newest LiDAR obstacle estimate more aggressively.
-# - LAPF_INFLATION_MARGIN_MM: extra radius added around each tracked obstacle.
-#   Increase this for more clearance around cones.
-# - LAPF_LEASH_HALF_ANGLE_DEG: forward cone for the virtual target. Smaller keeps
-#   the robot driving straighter; larger allows wider avoidance maneuvers.
+# --- LAPF tuning (checkpoint 2+ obstacle-avoidance runs) ---
+# Knob legend (raise/lower effect):
+#   SPEED            lower if it reacts too late or slips
+#   TOLERANCE        larger = looser checkpoint arrival
+#   LEASH_LENGTH     how far the virtual target runs ahead (smaller=cautious)
+#   REPULSION_RANGE  how early obstacles bend the target (larger=avoid earlier)
+#   TARGET_SPEED     virtual-target motion speed
+#   REPULSION_GAIN   obstacle push strength (too high oscillates, too low clips)
+#   FORCE_EMA_ALPHA  force smoothing (lower=smoother/slower to react)
+#   INFLATION_MARGIN extra keep-out radius per obstacle (larger=more clearance)
+#   LEASH_HALF_ANGLE forward cone for the target (smaller=straighter)
 OBSTACLE_AVOIDANCE_SPEED_MM_S = 140.0
 OBSTACLE_AVOIDANCE_TOLERANCE_MM = 60.0
 OBSTACLE_AVOIDANCE_MAX_ANGULAR_RAD_S = 1.0
@@ -162,71 +140,51 @@ LAPF_LEASH_LENGTH_MM = 500.0
 LAPF_REPULSION_RANGE_MM = 300.0
 LAPF_TARGET_SPEED_MM_S = 200.0
 LAPF_REPULSION_GAIN = 550.0
-# LAPF_ATTRACTION_GAIN = 1.0           # ORIGINAL (revert here): froze in the force-null between cones
-LAPF_ATTRACTION_GAIN = 3.0             # commit-forward bias: drive up through the gap, not balance L/R cones
-                                       # (also strengthens the 0.15*attr_gain tangent escape proportionally).
-                                       # If it CLIPS cones, back down toward ~2.5; if it still FREEZES, next
-                                       # step is the structural forward-arc repulsion filter (not done yet).
+# Attraction gain: commit-forward bias (drive up through the gap, don't balance
+# L/R cones). If it CLIPS cones back toward ~2.5; if it FREEZES, raise.
+# LAPF_ATTRACTION_GAIN = 1.0           # revert here: froze in the force-null between cones
+LAPF_ATTRACTION_GAIN = 3.0
 LAPF_FORCE_EMA_ALPHA = 0.35
-# --- Right-sized cone keep-out + arc-not-pivot tuning (applied together; COUPLED) ---
-# These three move as a set. The leash was narrowed to 35 deg to stop the
-# spin-in-place pivot, which is ONLY safe because inflation was dropped to 200.
-# Fix 2 geometry must hold: leash can place the virtual target outside the
+
+# --- Cone keep-out + arc-not-pivot (COUPLED -- inflation & leash move together) ---
+# Geometry that must hold: the leash can place the virtual target OUTSIDE the
 # inflated cone, i.e. reach = leash_length*sin(half_angle) >= eff_radius.
-#   reach = 500 * sin(45 deg) = 354 mm  >=  eff_radius = r_track(<=75) + 230 = 305 mm  (49 mm headroom)
-#   (was 35 deg = 287 mm, 40 deg = 321 mm; widened to 45 for aggressive dead-ahead-cone dodge room)
-# >>> DO NOT narrow the leash further (or raise inflation) without re-checking
-#     this inequality, or the target gets re-trapped inside the bubble (nose-in). <<<
-# LAPF_INFLATION_MARGIN_MM = 250.0      # ORIGINAL (revert here): oversized ~325 mm keep-out
-# LAPF_INFLATION_MARGIN_MM = 200.0      # prior: body-edge clearance ~33-58 mm -> grazed a near-side cone
-LAPF_INFLATION_MARGIN_MM = 230.0        # ~280-305 mm keep-out; body-edge-to-cone clearance ~63-88 mm
-# LAPF_LEASH_HALF_ANGLE_DEG = 50.0      # ORIGINAL (revert here): wide leash -> target far off-axis -> pivot
-# LAPF_LEASH_HALF_ANGLE_DEG = 35.0      # prior: arced but ran out of lateral room on a close dead-ahead cone
-# LAPF_LEASH_HALF_ANGLE_DEG = 40.0      # prior: +5 deg, still clipped the 3rd cone
-LAPF_LEASH_HALF_ANGLE_DEG = 45.0        # aggressive steering authority to clearly swing around a dead-ahead cone
-# Forward-clearance throttle (Fix 3): "see cone -> steer -> confirm clear -> go".
-# Scales LINEAR speed only (angular untouched), so when a cone is close dead-ahead
-# the robot keeps turning hard toward the committed open side while forward speed
-# drops, then ramps back to full as the forward corridor clears -- it won't nose
-# in before the turn develops. RE-ENABLED: safe now that the open-side COMMITTED
-# escape stops the old pivot/spin (with a committed turn direction, throttling
-# forward makes it ARC tightly around the cone instead of spinning in place).
-# Floored at 0.35 (not zero) so it never fully stops/freezes -- it keeps creeping
-# forward while it swings off the cone.
+#   reach = 500*sin(45) = 354 mm >= eff_radius = r_track(<=75) + 230 = 305 mm  (49 mm headroom)
+# >>> DON'T narrow the leash or raise inflation without re-checking this, or the
+#     target gets re-trapped inside the bubble (nose-in). <<<
+# LAPF_INFLATION_MARGIN_MM = 250.0      # revert here: oversized ~325 mm keep-out
+LAPF_INFLATION_MARGIN_MM = 230.0        # ~280-305 mm keep-out; body-to-cone clearance ~63-88 mm
+# LAPF_LEASH_HALF_ANGLE_DEG = 50.0      # revert here: wide leash -> target off-axis -> pivot
+LAPF_LEASH_HALF_ANGLE_DEG = 45.0        # steering authority to swing around a dead-ahead cone
+
+# --- Forward-clearance throttle (Fix 3): "see cone -> steer -> confirm clear -> go" ---
+# Scales LINEAR speed only: near a dead-ahead cone it keeps turning hard toward
+# the committed open side while forward speed drops, then ramps back as the
+# corridor clears -> arcs tightly around the cone instead of nosing in. Floored
+# (not zero) so it never fully freezes -- keeps creeping while it swings off.
 LAPF_SLOW_CLEARANCE_START_MM = 450.0   # begin easing off when nearest cone edge ahead <= this
-LAPF_SLOW_CLEARANCE_STOP_MM = 150.0    # most-slowed (floor) by this edge clearance (~"cone close")
-# LAPF_MIN_SPEED_FRAC = 0.5            # earlier mild value
-# LAPF_MIN_SPEED_FRAC = 1.0            # PRIOR (revert here): Fix 3 OFF (no throttle)
-LAPF_MIN_SPEED_FRAC = 0.35             # Fix 3 ON: floor 35% so it keeps creeping while swinging off the cone
+LAPF_SLOW_CLEARANCE_STOP_MM = 150.0    # most-slowed (floor) by this edge clearance
+# LAPF_MIN_SPEED_FRAC = 1.0            # revert here: Fix 3 OFF (no throttle)
+LAPF_MIN_SPEED_FRAC = 0.35             # floor 35% so it keeps creeping while swinging off the cone
 
 # ---------------------------------------------------------------------------
-# LAPF stall watchdog + recovery (checkpoint 2+ obstacle-avoidance segments).
+# --- LAPF stall watchdog + recovery (checkpoint 2+ avoidance segments) ---
 #
-# Detection (per active LAPF attempt):
-#   - No-progress (AUTHORITATIVE): if the best distance-to-goal has not improved
-#     by >= NO_PROGRESS_EPS_MM within NO_PROGRESS_WINDOW_S, the robot is stuck.
-#     -> recover + retry.
-#   - Per-attempt wall-clock (LAST RESORT): catches a "slow orbit" that keeps
-#     netting >EPS progress per window but never converges. Scales with the
-#     remaining distance so retries (shorter remaining distance) get a tighter
-#     cap. -> safe-stop, NOT retried (retrying an orbit doesn't help).
-#   - Segment hard ceiling: a global backstop over the whole segment including
-#     all recovery actions. -> safe-stop.
+# Detection (per LAPF attempt):
+#   - No-progress (AUTHORITATIVE): best dist-to-goal not improving by >= EPS
+#     within WINDOW -> recover + retry.
+#   - Per-attempt wall-clock (LAST RESORT): catches a slow orbit that nets some
+#     progress but never converges; scales with remaining distance. -> safe-stop,
+#     NOT retried (retrying an orbit doesn't help).
+#   - Segment hard ceiling: global backstop over the whole segment. -> safe-stop.
 #
-# Recovery (bounded, symmetry-breaking, rear-guarded):
-#   Backing up and re-issuing the IDENTICAL goal would walk back into the same
-#   symmetric local minimum. So each retry also (a) reverses to add clearance
-#   (guarded — see below), (b) reorients the heading by an alternating offset,
-#   and (c) re-issues toward a goal shifted laterally to the alternating side.
-#   Perturbing heading + goal breaks the goal/obstacle collinearity that creates
-#   the force null, so the attempt cannot reproduce the identical stall. The
-#   lateral side alternates per retry so the second attempt tries the other side
-#   if the first stayed blocked.
-#
-#   Blind reverse is unmodeled by the forward-facing planner, so before any
-#   reverse we check the rear LiDAR sector (confirmed tracks) for clearance and
-#   hard-cap the reverse distance. If the rear isn't clear we skip the reverse
-#   and do reorientation only (or safe-stop).
+# Recovery (bounded, symmetry-breaking, rear-guarded): re-issuing the IDENTICAL
+# goal would walk back into the same minimum, so each retry (a) reverses for
+# clearance (guarded), (b) reorients by an alternating offset, (c) re-issues
+# toward a laterally-shifted goal. Perturbing heading + goal breaks the
+# collinearity that creates the force null; the side alternates per retry.
+# Blind reverse is unmodeled, so it's gated on a rear-sector clearance check and
+# a hard cap; if the rear isn't clear it skips to reorient-only (or safe-stop).
 NO_PROGRESS_WINDOW_S = 4.0
 NO_PROGRESS_EPS_MM = 50.0
 WALLCLOCK_CAP_FACTOR = 1.5
@@ -234,13 +192,11 @@ WALLCLOCK_CAP_FLOOR_S = 12.0
 SEGMENT_HARD_CEILING_S = 35.0
 MAX_AVOIDANCE_RETRIES = 2
 
-# RECOVERY_REVERSE_MM = 300.0            # ORIGINAL (revert here): exceeded ~150 mm forward gain -> walked backward
+# RECOVERY_REVERSE_MM = 300.0            # revert here: exceeded ~150 mm forward gain -> walked backward
 RECOVERY_REVERSE_MM = 100.0              # nominal back-up distance (small, so a retry can't net rearward)
-# Only reverse when the robot is genuinely about to hit something dead ahead.
-# A force-null stall BETWEEN cones (cones beside the lane, nothing close in front)
-# must NOT reverse: backing up just re-enters the same symmetric minimum and walks
-# the robot backward. In that case skip the reverse and let reorient + lateral goal
-# perturbation break the symmetry instead.
+# Only reverse when about to hit something dead ahead. A force-null stall BETWEEN
+# cones (nothing close in front) must NOT reverse -- that just re-enters the same
+# minimum; reorient + lateral goal perturbation break the symmetry instead.
 RECOVERY_REVERSE_FRONT_TRIGGER_MM = 120.0  # reverse only if front clearance is below this
 RECOVERY_MIN_REVERSE_MM = 50.0           # below this, skip the reverse entirely
 RECOVERY_REVERSE_SPEED_MM_S = 100.0      # slow, so BTN_2 polling stays responsive
@@ -253,101 +209,89 @@ RECOVERY_REORIENT_TIMEOUT_S = 2.0
 RECOVERY_LATERAL_OFFSET_MM = 275.0       # ~inflation_margin + max disk radius
 REAR_SECTOR_HALF_ANGLE_DEG = 60.0        # +/- around directly-behind
 
-# Allow a little slack over the LAPF goal tolerance when confirming that a
-# finished LAPF handle actually reached the goal (vs the motion thread ending
-# early). Lets us tell success from failure on completion.
+# Slack over the LAPF goal tolerance when confirming a finished LAPF handle
+# actually reached the goal (vs the motion thread ending early).
 SUCCESS_MARGIN_MM = 20.0
 
 # ---------------------------------------------------------------------------
-# Checkpoint 3 wall-referenced terminal maneuver (Fix #2). Replaces the old
-# blind turn / drive-1-tile / turn hop onto a drift-corrupted goal coordinate.
-# The cp2->cp3 LAPF run now drives up the field until the outer course wall is
-# within WALL_DETECT_STANDOFF_MM ahead, squares up to that wall and creeps to a
-# fixed standoff (re-zeroing against an absolute physical reference), then turns
-# onto the checkpoint-3 finish straightaway and only drives it once the front
-# LiDAR confirms the path is clear. If it can't confirm, it safe-stops to IDLE
-# rather than driving blind.
+# --- CHECKPOINT 3 wall-referenced terminal maneuver (Fix #2) ---
+# Replaces the old blind turn/drive/turn onto a drift-corrupted goal coordinate.
+# The cp2->cp3 LAPF run drives up the field until the outer wall is within
+# standoff ahead, squares up, creeps to a fixed standoff (re-zeroing vs an
+# absolute physical reference), turns onto the finish straightaway, and drives it
+# only once the front LiDAR confirms it's clear (else safe-stop, not blind).
 #
-# All distances/turns below need FIELD TUNING and several depend on the
-# self-footprint filter (Fix #1) keeping the forward cone phantom-free — verify
-# the `nearest obstacles` dump is clean before trusting front_clearance_mm().
+# All distances/turns below need FIELD TUNING and depend on the self-footprint
+# filter (Fix #1) keeping the forward cone phantom-free -- verify the `nearest
+# obstacles` dump is clean before trusting front_clearance_mm().
 #
-# IMPORTANT: the two turn SIGNS are UNVERIFIED. turn_by(+deg) = right,
-# turn_by(-deg) = left in this codebase, but which way squares up to the wall
-# and which way faces the finish straightaway must be confirmed PHYSICALLY.
-# Keep BTN_2 ready on the first run.
-WALL_DETECT_STANDOFF_MM = 500.0        # end the LAPF run when the wall is this close ahead
-# Minimum forward advance before the cp3 terminal turn may fire. Advance is the
-# projection of (current pose - cp2 start) onto the approach heading -- drift-free
-# along-axis progress, NOT the odometry goal coordinate -- so lateral drift /
-# weaving doesn't inflate it. ANDed with the wall/standoff trigger: even once the
-# wall is detected, the turn is HELD until advance reaches this floor, and the
-# approach keeps running until then.
-#
-# This is the ONLY "we've driven far enough that what's ahead must be the wall,
-# not a cone" guard (the old goal-coordinate WALL_ARM_REMAINING_MM arm gate is
-# removed -- no drift-prone distance is in the fire decision any more). The real
-# end wall is 5 tiles (5*610=3050 mm) out, so anything seen meaningfully nearer is
-# a cone; requiring 4 tiles of advance before trusting the standoff trigger
-# rejects every cone in the lower field. NEEDS FIELD TUNING: the fire-time log
-# below prints the exact measured advance, so dial this in from one run.
-CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM   # 4 tiles (4*610=2440 mm); end wall sits at 5 tiles
-# WALL_APPROACH_TARGET_MM = 350.0      # ORIGINAL (revert here): stopped 75 mm closer
-# WALL_APPROACH_TARGET_MM = 425.0      # prior: still a little too close to wall 1
-WALL_APPROACH_TARGET_MM = 475.0        # stop this far from the wall (re-zero); +125 mm total backoff (both walls)
-# WALL_APPROACH_SPEED_MM_S = 80.0      # ORIGINAL (revert here): too slow, timed out ~640 mm short
+# IMPORTANT: both turn SIGNS are UNVERIFIED (turn_by(+)=right, (-)=left). Which
+# way squares to the wall and which faces the finish must be confirmed
+# PHYSICALLY -- keep BTN_2 ready on the first run.
+# WALL_DETECT_STANDOFF_MM = 500.0      # revert here: narrow-cone read only saw a HEAD-ON wall, so
+                                       # as LAPF swung the robot parallel the turn never fired (slid along to a stall).
+WALL_DETECT_STANDOFF_MM = 700.0        # end the LAPF run when the wall is this close ahead. Raised + read over a
+                                       # WIDE arc (below) so the turn fires while still facing ~the wall, before LAPF
+                                       # repulsion swings it parallel. With the 4-tile gate the only thing this close
+                                       # ahead is the end wall.
+# Half-angle of the forward ARC used to detect the wall during the LAPF approach.
+# The narrow +/-150 mm front cone only reads a wall the robot squarely faces; LAPF
+# steers ALONG a wall, so the narrow cone reads inf and the turn never fires. This
+# wide arc reads an angled wall; <90 deg still excludes a fully-parallel wall.
+# Used ONLY for the cp2->cp3 TRIGGER; the squared-up creep keeps the narrow cone.
+WALL_DETECT_ARC_HALF_DEG = 60.0
+# Minimum forward advance before the cp3 terminal turn may fire. Advance =
+# projection of (pose - cp2 start) onto the approach heading -- drift-free
+# along-axis progress, so weaving doesn't inflate it. ANDed with the standoff
+# trigger: even with the wall detected the turn is HELD until advance hits this
+# floor. This is the ONLY "far enough that what's ahead must be the wall, not a
+# cone" guard (the end wall is 5 tiles out, so 4 tiles of advance rejects every
+# lower-field cone). NEEDS FIELD TUNING -- the fire-time log prints measured advance.
+CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM   # 4 tiles (2440 mm); end wall at 5 tiles
+# WALL_APPROACH_TARGET_MM = 350.0      # revert here: stopped 75 mm closer
+WALL_APPROACH_TARGET_MM = 475.0        # stop this far from the wall (re-zero); +125 mm total backoff
+# WALL_APPROACH_SPEED_MM_S = 80.0      # revert here: too slow, timed out ~640 mm short
 WALL_APPROACH_SPEED_MM_S = 150.0       # closed-loop approach speed (closes the full ~1300 mm in time)
-# WALL_APPROACH_TIMEOUT_S = 8.0        # ORIGINAL (revert here): too short to close the full distance
+# WALL_APPROACH_TIMEOUT_S = 8.0        # revert here: too short to close the full distance
 WALL_APPROACH_TIMEOUT_S = 16.0         # watchdog for the approach drive (not under LAPF watchdog)
-# The standoff the turn actually fires at is variable run-to-run: the creep only
-# samples the front cone once per FSM tick and lidar returns jitter, so a single
-# noisy frame dipping to the target would otherwise commit the turn at the wrong
-# distance. Before turning we require the front clearance to read inside a
-# "reasonable range" -- between the target and WALL_APPROACH_BAND_MM nearer than it
-# -- for WALL_APPROACH_CONFIRM_FRAMES consecutive ticks. Until then we keep creeping
-# (if still beyond the band) or hold (if jittering / too close), and every check is
-# logged so the real standoff at turn-time is visible. WALL_APPROACH_TIMEOUT_S is
-# the backstop if it never settles.
+# Turn-fire standoff is variable run-to-run (one jittery front sample per tick),
+# so before turning we require the front read to sit in-range [TARGET-BAND, TARGET]
+# for CONFIRM_FRAMES consecutive ticks; else keep creeping / hold. Every check is
+# logged so the real standoff is visible; TIMEOUT is the backstop if it never settles.
 WALL_APPROACH_BAND_MM = 50.0           # in-range window is [TARGET-BAND, TARGET], e.g. 375-425 mm
 WALL_APPROACH_CONFIRM_FRAMES = 3       # consecutive in-range front reads required before turning
 CLEAR_PATH_MIN_MM = 1000.0             # straightaway is "clear" if nearest front return is beyond this
 FRONT_CONE_HALF_WIDTH_MM = 150.0       # half-width of the forward cone used to read the wall
 FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading the wall
-# Both turns: SIGN *and* MAGNITUDE need physical verification. If the wall the
-# robot re-zeroes against is the same one detected straight ahead, CP3_FACE_WALL
-# may be ~0 (already squared up); if the re-zero wall is the perpendicular
-# finish-side wall, it's ~90. CP3_FACE_STRAIGHTAWAY then turns from facing the
-# wall onto the finish straightaway. Set both on the venue.
-CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # turn to face the re-zero wall (SIGN UNVERIFIED; magnitude calibrated)
-CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish straightaway (SIGN UNVERIFIED; magnitude calibrated)
+# Both turns: SIGN *and* MAGNITUDE need physical verification. FACE_WALL may be
+# ~0 (re-zero wall already ahead) or ~90 (perpendicular finish-side wall);
+# FACE_STRAIGHTAWAY then turns onto the finish straightaway. Set both on the venue.
+CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # face the re-zero wall (SIGN UNVERIFIED)
+CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish straightaway (SIGN UNVERIFIED)
 
-# Forward gap between the TWO wall approaches. After the turn following wall 1
-# there is no wall in the forward cone yet; the robot advances this far before
-# wall 2 comes into range and the second approach can run.
-CP3_GAP_ADVANCE_DISTANCE_MM = 610.0    # ~1 course tile, open-loop forward move between wall 1 turn and wall 2
+# Forward gap between the TWO wall approaches: after the wall-1 turn no wall is in
+# the cone yet, so advance this far before wall 2 comes into range.
+CP3_GAP_ADVANCE_DISTANCE_MM = 610.0    # ~1 tile, open-loop, between wall 1 turn and wall 2
 
-# Position sanity check after the turn onto the finish straightaway: with the
-# robot squared to the wall at ~standoff then turned 90 deg right, the wall it
-# re-zeroed against should now sit ~standoff away BEHIND and to the LEFT. These
-# are a logged sanity check only -- they WARN if off but never block the drive
-# (turn SIGN is UNVERIFIED, so a flipped sign shows up here as a large/inf read).
-# WALL_FINISH_SANITY_TARGET_MM = 300.0 # ORIGINAL (revert here): tripped spuriously once the standoff went up
-# WALL_FINISH_SANITY_TARGET_MM = 425.0 # prior: tracked the 425 standoff
-WALL_FINISH_SANITY_TARGET_MM = 475.0   # expected rear/left clearance after the final turn (= the 475 mm standoff)
-WALL_FINISH_SANITY_BAND_MM = 120.0     # warn (don't fail) if a reading is outside target +/- this (ok 355-595 mm)
+# Position sanity check after the final turn: the re-zero wall should now sit
+# ~standoff BEHIND and to the LEFT. LOGGED WARN only, never blocks (a flipped
+# turn sign shows up here as a large/inf read).
+# WALL_FINISH_SANITY_TARGET_MM = 300.0 # revert here: tripped spuriously once the standoff went up
+WALL_FINISH_SANITY_TARGET_MM = 475.0   # expected rear/left clearance after the final turn (= standoff)
+WALL_FINISH_SANITY_BAND_MM = 120.0     # warn if a reading is outside target +/- this (ok 355-595 mm)
 
-# Finish-straightaway wall-following self-correction. While driving the cp3
-# straightaway, steer gently toward whichever side wall has MORE room so the
-# robot tracks down the middle instead of drifting into a wall. The yaw nudge is
-# proportional to (left - right) clearance, capped, and gentle to avoid
-# oscillation; applied only when BOTH side walls are visible (else drive straight).
-# SIGN is UNVERIFIED: set_velocity is CCW-positive, but if it steers INTO the
-# closer wall (left/right gap DIVERGES instead of converging), flip the sign.
+# Finish-straightaway wall-following: steer gently toward the side wall with MORE
+# room so the robot tracks the middle. Proportional to (left-right) clearance,
+# capped, only when BOTH walls are visible. SIGN UNVERIFIED (set_velocity is
+# CCW-positive); flip if it steers INTO the closer wall.
 CP3_STRAIGHTAWAY_CORRECTION_SIGN = 1               # flip to -1 if it corrects the wrong way
 CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM = 0.05   # deg/s of yaw per mm of left-right imbalance
 CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S = 15.0       # cap on the yaw correction (gentle, no oscillation)
 
 
+# ===========================================================================
+# MISSION STEPS (cp1/cp2 scripted sequence) + HELPER FUNCTIONS
+# ===========================================================================
 StepKind = Literal["move_to", "turn_by", "move_forward", "square_to_wall"]
 
 
@@ -587,6 +531,41 @@ def front_clearance_mm(
             continue
         if px < nearest:
             nearest = px
+    return nearest
+
+
+def wall_ahead_clearance_mm(
+    robot: Robot,
+    half_arc_deg: float = WALL_DETECT_ARC_HALF_DEG,
+    max_range_mm: float = FRONT_CLEARANCE_MAX_RANGE_MM,
+) -> float:
+    """Nearest raw-cloud return within a WIDE forward arc, by straight-line range.
+
+    Unlike front_clearance_mm's narrow +/-150 mm cone (which only reads a wall the
+    robot is squarely facing), this keeps any return whose body-frame bearing is
+    within +/- half_arc_deg of straight ahead (+x) and closer than max_range_mm,
+    and returns the smallest RANGE (hypot). The cp2->cp3 LAPF approach tends to
+    steer the robot ALONG the outer wall rather than into it, swinging it off
+    head-on before the narrow cone ever reads <= standoff; this arc still reads the
+    wall on an angled approach so the terminal turn can fire before the robot goes
+    fully parallel. +inf when the arc is empty. fwd=+x, left=+y (obstacle-dump axes).
+
+    half_arc_deg < 90 keeps a fully-parallel wall (returns at ~+/-90 deg) excluded,
+    so this can't latch onto a wall the robot is already running beside. Uses the
+    raw cloud (self-footprint excluded, Fix #1), same as front_clearance_mm.
+    """
+    half_rad = math.radians(half_arc_deg)
+    nearest = math.inf
+    for px, py in robot.get_obstacles():
+        if px <= 0.0:
+            continue
+        if abs(math.atan2(py, px)) > half_rad:
+            continue
+        rng = math.hypot(px, py)
+        if rng > max_range_mm:
+            continue
+        if rng < nearest:
+            nearest = rng
     return nearest
 
 
@@ -1041,6 +1020,9 @@ def print_obstacle_avoidance_status(robot: Robot, goal_mm: tuple[float, float] |
     print("    " + nearest_obstacle_summary(robot, getattr(robot, "LAPF_MAX_PLANNER_TRACKS", 6)))
 
 
+# ===========================================================================
+# MISSION FSM  (state machine: INIT -> IDLE -> cp1/cp2 -> cp3 -> cp4 -> cp5)
+# ===========================================================================
 def run(robot: Robot) -> None:
     configure_robot(robot)
 
@@ -1099,14 +1081,10 @@ def run(robot: Robot) -> None:
         elif state == "IDLE":
             if robot.was_button_pressed(Button.BTN_1):
                 if START_AT_CP2:
-                    # TEMP/testing-only path (START_AT_CP2): skip the scripted
-                    # cp1->bridge->cp2 steps and jump straight into the
-                    # cp2->cp3 obstacle-avoidance leg. reset_mission_pose() sets
-                    # odometry to (0,0, INITIAL_THETA_DEG=+Y), i.e. the cp2 start
-                    # pose, so begin_avoidance_segment aims the goal straight up
-                    # the obstacle course. Place the robot at the cp2 spot facing
-                    # +Y before pressing BTN_1. Set START_AT_CP2=False to restore
-                    # the full scripted run.
+                    # TEMP/testing path: skip the scripted cp1->cp2 steps and jump
+                    # to the cp2->cp3 leg. reset_mission_pose() zeroes odometry to
+                    # the cp2 start pose (0,0,+Y), so the goal aims up the course.
+                    # Place the robot at the cp2 spot facing +Y first.
                     reset_mission_pose(robot)
                     show_running_leds(robot)
                     step_index = len(MISSION_STEPS)
@@ -1216,23 +1194,17 @@ def run(robot: Robot) -> None:
                             safe_stop_to_idle(robot, f"LAPF failed ({av['label']}) - retries exhausted")
                             state = "IDLE"
                 else:
-                    # cp2->cp3 approach: end the LAPF run as soon as the outer
-                    # course wall is within standoff ahead (Fix #2), instead of
-                    # chasing the drift-corrupted goal coordinate. The terminal
-                    # turn fires only when BOTH drift-free guards hold:
-                    #   1. standoff: live LiDAR reads something <= WALL_DETECT_STANDOFF_MM
-                    #      straight ahead; and
-                    #   2. min advance: at least CHECKPOINT_3_MIN_ADVANCE_MM (4 tiles)
-                    #      of forward progress along the approach axis, so a cone in
-                    #      the lower field can't trigger it and the turn can't fire
-                    #      early. Until advance clears the floor the approach keeps
-                    #      running.
-                    # No goal-coordinate odometry distance is in this decision any
-                    # more (the old WALL_ARM_REMAINING_MM arm gate is gone). The
-                    # cp3->cp4 segment leaves terminate_on_wall False and keeps the
-                    # goal-coordinate termination handled above.
+                    # cp2->cp3 approach: end the LAPF run when the outer wall is in
+                    # range (Fix #2), not at the drift-corrupted goal. Fire the turn
+                    # only when BOTH drift-free guards hold:
+                    #   1. standoff: a return <= WALL_DETECT_STANDOFF_MM in a WIDE
+                    #      forward arc (LAPF steers ALONG the wall, so the narrow
+                    #      cone would miss it on an angled approach); and
+                    #   2. min advance: >= CHECKPOINT_3_MIN_ADVANCE_MM (4 tiles) of
+                    #      along-axis progress, so a lower-field cone can't trigger it.
+                    # cp3->cp4 leaves terminate_on_wall False (goal-coordinate stop).
                     detect_wall = av.get("terminate_on_wall")
-                    front = front_clearance_mm(robot) if detect_wall else math.inf
+                    front = wall_ahead_clearance_mm(robot) if detect_wall else math.inf
                     fire_turn = False
                     if front <= WALL_DETECT_STANDOFF_MM:
                         advance = advance_along_axis_mm(robot, av)
@@ -1245,7 +1217,7 @@ def run(robot: Robot) -> None:
                             print(
                                 f"[FSM] cp3 turn held by advance gate: advance {advance:.0f} mm "
                                 f"< min {CHECKPOINT_3_MIN_ADVANCE_MM:.0f} mm "
-                                f"(wall {front:.0f} mm ahead) - continuing approach"
+                                f"(wall {front:.0f} mm in {WALL_DETECT_ARC_HALF_DEG:.0f} deg arc) - continuing approach"
                             )
                             av["last_gate_log_at"] = now
 
@@ -1254,7 +1226,8 @@ def run(robot: Robot) -> None:
                         # gives the exact along-axis distance at which the turn
                         # fires — dial CHECKPOINT_3_MIN_ADVANCE_MM in from this.
                         print(
-                            f"[FSM] checkpoint 3 approach - outer wall {front:.0f} mm ahead, "
+                            f"[FSM] checkpoint 3 approach - outer wall {front:.0f} mm in "
+                            f"{WALL_DETECT_ARC_HALF_DEG:.0f} deg arc, "
                             f"advance {advance:.0f} mm (>= min {CHECKPOINT_3_MIN_ADVANCE_MM:.0f} mm) "
                             "- squaring up"
                         )
@@ -1349,10 +1322,9 @@ def run(robot: Robot) -> None:
                 state = "CP3_APPROACH_WALL"
 
         elif state == "CP3_APPROACH_WALL":
-            # Closed-loop creep toward the wall until the front cone reads the
-            # target standoff. Velocity-controlled (no MotionHandle). Timeout
-            # DISABLED (see below) per request: it keeps creeping until the wall
-            # appears and the standoff is reached; BTN_2 is the only stop.
+            # Closed-loop velocity creep toward the wall until the front cone reads
+            # the target standoff. Timeout DISABLED (below): keeps creeping until
+            # the standoff is reached; BTN_2 is the only stop.
             if robot.was_button_pressed(Button.BTN_2):
                 robot.stop()
                 motion_handle = None
@@ -1362,9 +1334,8 @@ def run(robot: Robot) -> None:
             else:
                 front = front_clearance_mm(robot)
                 in_lower = WALL_APPROACH_TARGET_MM - WALL_APPROACH_BAND_MM
-                # "In range" only when the front cone reads a plausible final standoff:
-                # at/under the target but no nearer than the band's lower edge. This is
-                # the checker that keeps the variable stop distance honest before turning.
+                # "In range" = at/under the target but no nearer than the band's
+                # lower edge -- keeps the variable stop distance honest before turning.
                 in_range = in_lower <= front <= WALL_APPROACH_TARGET_MM
 
                 if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
@@ -1379,9 +1350,8 @@ def run(robot: Robot) -> None:
                     last_status_print_at = now
 
                 if in_range:
-                    # In the reasonable standoff band: hold and require a few
-                    # consecutive in-range reads so a single noisy frame can't fire
-                    # the turn at the wrong distance.
+                    # Hold and require CONFIRM_FRAMES consecutive in-range reads so
+                    # a single noisy frame can't fire the turn at the wrong distance.
                     robot.stop()
                     av["wall_inrange_count"] += 1
                     if av["wall_inrange_count"] >= WALL_APPROACH_CONFIRM_FRAMES:
@@ -1397,11 +1367,10 @@ def run(robot: Robot) -> None:
                         )
                         last_status_print_at = now
                         state = "CP3_FACE_STRAIGHTAWAY"
-                # TIMEOUT DISABLED per request ("get rid of the timeout timer"): the
-                # approach no longer safe-stops if the wall takes a while to appear; it
-                # keeps creeping (incl. the inf case below) until it reaches the standoff.
-                # BTN_2 is the only stop now. Re-enable by uncommenting this branch AND
-                # restoring the inf-case hold below (WALL_APPROACH_TIMEOUT_S still defined).
+                # TIMEOUT DISABLED: the approach no longer safe-stops if the wall is
+                # slow to appear -- it keeps creeping (incl. the inf case below) until
+                # the standoff is reached; BTN_2 is the only stop. To re-enable,
+                # uncomment this branch AND restore the inf-case hold below.
                 # ORIGINAL (revert here):
                 # elif (now - av["wall_approach_started_at"]) >= WALL_APPROACH_TIMEOUT_S:
                 #     safe_stop_to_idle(
@@ -1412,10 +1381,8 @@ def run(robot: Robot) -> None:
                 #     )
                 #     state = "IDLE"
                 elif math.isfinite(front) and front < in_lower:
-                    # Nearer than the band's lower edge: too close to creep further.
-                    # Hold and keep sampling - jitter may settle back into range; if it
-                    # stays this close the timeout above safe-stops rather than turning
-                    # at a bad standoff.
+                    # Too close to creep further: hold and keep sampling (jitter may
+                    # settle back into range).
                     robot.stop()
                     av["wall_inrange_count"] = 0
                 elif math.isfinite(front):
@@ -1423,20 +1390,17 @@ def run(robot: Robot) -> None:
                     av["wall_inrange_count"] = 0
                     robot.set_velocity(WALL_APPROACH_SPEED_MM_S, 0.0)
                 else:
-                    # Wall not in the forward cone yet: KEEP GOING (creep forward) so
-                    # it closes the gap until the wall comes into range, instead of
-                    # holding. This is what was freezing the wall-2 approach (front=inf).
-                    # ORIGINAL (revert here): held in place until the (now-disabled)
-                    # timeout fired:
+                    # Wall not in the cone yet (front=inf): KEEP creeping to close the
+                    # gap (holding here was what froze the wall-2 approach).
+                    # ORIGINAL (revert here): held in place until the timeout fired:
                     #   av["wall_inrange_count"] = 0
                     #   robot.stop()
                     av["wall_inrange_count"] = 0
                     robot.set_velocity(WALL_APPROACH_SPEED_MM_S, 0.0)
 
         elif state == "CP3_FACE_STRAIGHTAWAY":
-            # Post-wall turn (turn started on entry). After wall 1 this turn faces
-            # the forward gap -> advance CP3_GAP_ADVANCE_DISTANCE_MM before wall 2 is
-            # in range. After wall 2 it faces the finish straightaway -> verify+drive.
+            # Post-wall turn (started on entry). After wall 1 -> advance the gap to
+            # wall 2; after wall 2 -> face the finish straightaway, verify + drive.
             # ORIGINAL (revert here): single wall, this always went straight to verify:
             #   elif motion_handle is not None and motion_handle.is_finished():
             #       motion_handle = None
@@ -1470,9 +1434,8 @@ def run(robot: Robot) -> None:
                     state = "CP3_VERIFY_STRAIGHTAWAY"
 
         elif state == "CP3_GAP_ADVANCE":
-            # Forward gap between the two wall approaches: drive ~1 tile so wall 2
-            # enters the forward cone, then run the second approach to the same
-            # 425 mm standoff. Open-loop move_forward (MotionHandle).
+            # Open-loop drive ~1 tile so wall 2 enters the forward cone, then run
+            # the second approach to the same standoff.
             if robot.was_button_pressed(Button.BTN_2):
                 cancel_motion(robot, motion_handle)
                 motion_handle = None
@@ -1503,9 +1466,8 @@ def run(robot: Robot) -> None:
                     state = "CP3_APPROACH_WALL"
 
         elif state == "CP3_VERIFY_STRAIGHTAWAY":
-            # One-shot alignment check: a clear forward cone means we are lined up
-            # with the straightaway. If blocked, flag and stop rather than drive
-            # blind (per design decision).
+            # One-shot alignment check: a clear forward cone means we're lined up.
+            # If blocked, stop rather than drive blind.
             if robot.was_button_pressed(Button.BTN_2):
                 robot.stop()
                 motion_handle = None
@@ -1513,11 +1475,10 @@ def run(robot: Robot) -> None:
                 print("[FSM] IDLE - cp3 straightaway verify cancelled")
                 state = "IDLE"
             else:
-                # Position sanity check (LOGGED; WARN only, never blocks). After the
-                # 90 deg right turn onto the straightaway the re-zero wall should sit
-                # ~target away BEHIND and to the LEFT. Turn SIGN is UNVERIFIED, so a
-                # flipped sign shows up here as an out-of-band / inf reading -> warn,
-                # but still defer the go/no-go to the front-clear gate below.
+                # Position sanity check (LOGGED, WARN only, never blocks): the
+                # re-zero wall should sit ~target away BEHIND and to the LEFT. A
+                # flipped (UNVERIFIED) turn sign shows up as out-of-band/inf -> warn;
+                # the go/no-go still defers to the front-clear gate below.
                 rear = directional_clearance_mm(robot, "rear")
                 left = directional_clearance_mm(robot, "left")
                 lo = WALL_FINISH_SANITY_TARGET_MM - WALL_FINISH_SANITY_BAND_MM
@@ -1545,8 +1506,8 @@ def run(robot: Robot) -> None:
                         f"driving {CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM:.0f} mm to checkpoint 3 "
                         "with wall-following"
                     )
-                    # Velocity-controlled wall-following drive (no MotionHandle);
-                    # the CP3_DRIVE_STRAIGHTAWAY loop steers + tracks distance.
+                    # Velocity-controlled wall-following drive (the
+                    # CP3_DRIVE_STRAIGHTAWAY loop steers + tracks distance).
                     # ORIGINAL (revert here): open-loop fixed-distance move_forward:
                     #   motion_handle = robot.move_forward(
                     #       CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM,
@@ -1565,12 +1526,10 @@ def run(robot: Robot) -> None:
                     state = "IDLE"
 
         elif state == "CP3_DRIVE_STRAIGHTAWAY":
-            # Velocity-controlled wall-following drive to the cp3 checkpoint. Each
-            # tick reads the left/right side walls and steers gently toward the side
-            # with MORE room so the robot tracks down the middle instead of drifting
-            # into a wall; the rear wall is read as a progress/sanity reference. No
-            # MotionHandle (own velocity loop), so BTN_2 is polled every tick and the
-            # LAPF watchdog does not apply. Terminates on odometry distance.
+            # Velocity-controlled wall-following drive to cp3: each tick steers
+            # toward the side wall with MORE room so it tracks down the middle.
+            # Own velocity loop (no MotionHandle, no LAPF watchdog); terminates on
+            # odometry distance, BTN_2 polled every tick.
             if robot.was_button_pressed(Button.BTN_2):
                 robot.stop()
                 motion_handle = None
