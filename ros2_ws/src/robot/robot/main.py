@@ -78,7 +78,7 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # course (+Y) before pressing BTN_1.
 #   >>> SET BACK TO False FOR THE FULL cp1->cp5 RUN <<<  (this line)
 # When False the scripted MISSION_STEPS sequence runs unchanged.
-START_AT_CP2 = True  # TEMP: True = start at checkpoint 2 (skip scripted steps)
+START_AT_CP2 = False  # TEMP: True = start at checkpoint 2 (skip scripted steps)
 # ===========================================================================
 
 # Commanded magnitude for a physical 90-degree turn. The robot overshoots a
