@@ -27,7 +27,7 @@ from robot.robot import Robot
 
 YAW_SERVO = ServoChannel.CH_1
 PITCH_SERVO = ServoChannel.CH_2
-LOADER_SERVO = ServoChannel.CH_3
+LOADER_SERVO = ServoChannel.CH_4
 FLYWHEEL_MOTOR = Motor.DC_M3
 
 # Yaw axis (degrees, 0–180 via set_servo; use set_servo_pulse if you need more)
@@ -44,8 +44,8 @@ PITCH_MAX_DEG = 210.0
 LOADER_MIN_DEG = -90.0              # most negative allowed (maps to 500 µs)
 LOADER_MAX_DEG = 180.0              # most positive allowed (maps to 2500 µs)
 LOADER_REST_DEG = 120.0
-LOADER_PUSH_DEG = 220.0
-LOADER_PUSH_DWELL_S = 0.15          # used by load() test cycle
+LOADER_PUSH_DEG = 190.0
+LOADER_PUSH_DWELL_S = 0.3          # used by load() test cycle
 LOADER_RETURN_DWELL_S = 0.10
 SHOT_LOADER_HOLD_S = 0.20           # pause at push before flywheel spins up
 SHOT_FIRE_DWELL_S = 0.30            # hold push while flywheel fires the ball
