@@ -249,7 +249,8 @@ WALL_DETECT_ARC_HALF_DEG = 60.0
 # lower-field cone). NEEDS FIELD TUNING -- the fire-time log prints measured advance.
 CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM   # 4 tiles (2440 mm); end wall at 5 tiles
 # WALL_APPROACH_TARGET_MM = 350.0      # revert here: stopped 75 mm closer
-WALL_APPROACH_TARGET_MM = 475.0        # stop this far from the wall (re-zero); +125 mm total backoff
+# WALL_APPROACH_TARGET_MM = 475.0      # prior: +125 mm total backoff
+WALL_APPROACH_TARGET_MM = 700.0        # stop this far from the wall (re-zero); doubled-ish approach standoff
 # WALL_APPROACH_SPEED_MM_S = 80.0      # revert here: too slow, timed out ~640 mm short
 WALL_APPROACH_SPEED_MM_S = 150.0       # closed-loop approach speed (closes the full ~1300 mm in time)
 # WALL_APPROACH_TIMEOUT_S = 8.0        # revert here: too short to close the full distance
@@ -269,16 +270,18 @@ FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading
 CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # face the re-zero wall (SIGN UNVERIFIED)
 CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish straightaway (SIGN UNVERIFIED)
 
-# Forward gap between the TWO wall approaches: after the wall-1 turn no wall is in
-# the cone yet, so advance this far before wall 2 comes into range.
-CP3_GAP_ADVANCE_DISTANCE_MM = 610.0    # ~1 tile, open-loop, between wall 1 turn and wall 2
+# Forward "onto the straightaway" move after the post-wall turn (single wall
+# approach -- no wall 2 any more). Open-loop; ends -> verify + drive straightaway.
+# CP3_GAP_ADVANCE_DISTANCE_MM = 610.0  # prior: ~1 tile, used between the old two wall approaches
+CP3_GAP_ADVANCE_DISTANCE_MM = 400.0    # shorter forward hop onto the straightaway lane
 
 # Position sanity check after the final turn: the re-zero wall should now sit
 # ~standoff BEHIND and to the LEFT. LOGGED WARN only, never blocks (a flipped
 # turn sign shows up here as a large/inf read).
 # WALL_FINISH_SANITY_TARGET_MM = 300.0 # revert here: tripped spuriously once the standoff went up
-WALL_FINISH_SANITY_TARGET_MM = 475.0   # expected rear/left clearance after the final turn (= standoff)
-WALL_FINISH_SANITY_BAND_MM = 120.0     # warn if a reading is outside target +/- this (ok 355-595 mm)
+# WALL_FINISH_SANITY_TARGET_MM = 475.0 # prior: tracked the old 475 standoff
+WALL_FINISH_SANITY_TARGET_MM = 700.0   # expected rear/left clearance after the final turn (= standoff)
+WALL_FINISH_SANITY_BAND_MM = 120.0     # warn if a reading is outside target +/- this (ok 580-820 mm)
 
 # Finish-straightaway wall-following: steer gently toward the side wall with MORE
 # room so the robot tracks the middle. Proportional to (left-right) clearance,
@@ -1399,13 +1402,13 @@ def run(robot: Robot) -> None:
                     robot.set_velocity(WALL_APPROACH_SPEED_MM_S, 0.0)
 
         elif state == "CP3_FACE_STRAIGHTAWAY":
-            # Post-wall turn (started on entry). After wall 1 -> advance the gap to
-            # wall 2; after wall 2 -> face the finish straightaway, verify + drive.
-            # ORIGINAL (revert here): single wall, this always went straight to verify:
-            #   elif motion_handle is not None and motion_handle.is_finished():
-            #       motion_handle = None
-            #       print("[FSM] facing finish straightaway - verifying path is clear")
-            #       state = "CP3_VERIFY_STRAIGHTAWAY"
+            # Turn #2 (started on entry): from squared-up-at-the-wall onto the finish
+            # straightaway. SINGLE wall approach -- after this turn the robot drives
+            # forward onto the straightaway lane, then verifies and drives it.
+            # End-of-course = turn / straight / turn / straight / straightaway.
+            # ORIGINAL (revert here): two-wall hop -- branched on wall_approach_num,
+            # driving a gap then a SECOND wall creep+turn. Removed: with the 700 mm
+            # standoff the wall-2 approach always sat frozen (wall ended < 650 mm).
             if robot.was_button_pressed(Button.BTN_2):
                 cancel_motion(robot, motion_handle)
                 motion_handle = None
@@ -1414,28 +1417,23 @@ def run(robot: Robot) -> None:
                 state = "IDLE"
             elif motion_handle is not None and motion_handle.is_finished():
                 motion_handle = None
-                if av.get("wall_approach_num", 1) == 1:
-                    # No wall in front yet right after the wall-1 turn: drive the gap
-                    # first, then approach wall 2.
-                    print(
-                        "[FSM] turned after wall 1 - advancing "
-                        f"{CP3_GAP_ADVANCE_DISTANCE_MM:.0f} mm before wall 2 comes into range"
-                    )
-                    motion_handle = robot.move_forward(
-                        CP3_GAP_ADVANCE_DISTANCE_MM,
-                        velocity=DRIVE_VELOCITY_MM_S,
-                        tolerance=DRIVE_TOLERANCE_MM,
-                        blocking=False,
-                    )
-                    last_status_print_at = now
-                    state = "CP3_GAP_ADVANCE"
-                else:
-                    print("[FSM] turned after wall 2 - facing finish straightaway, verifying path is clear")
-                    state = "CP3_VERIFY_STRAIGHTAWAY"
+                print(
+                    "[FSM] turned onto straightaway - advancing "
+                    f"{CP3_GAP_ADVANCE_DISTANCE_MM:.0f} mm onto the straightaway lane"
+                )
+                motion_handle = robot.move_forward(
+                    CP3_GAP_ADVANCE_DISTANCE_MM,
+                    velocity=DRIVE_VELOCITY_MM_S,
+                    tolerance=DRIVE_TOLERANCE_MM,
+                    blocking=False,
+                )
+                last_status_print_at = now
+                state = "CP3_GAP_ADVANCE"
 
         elif state == "CP3_GAP_ADVANCE":
-            # Open-loop drive ~1 tile so wall 2 enters the forward cone, then run
-            # the second approach to the same standoff.
+            # Straight #2: forward hop after the post-wall turn to get onto the finish
+            # straightaway lane, then verify the path and drive it. (No second wall
+            # approach any more -- see CP3_FACE_STRAIGHTAWAY.)
             if robot.was_button_pressed(Button.BTN_2):
                 cancel_motion(robot, motion_handle)
                 motion_handle = None
@@ -1454,16 +1452,10 @@ def run(robot: Robot) -> None:
                     last_status_print_at = now
 
                 if motion_handle is not None and motion_handle.is_finished():
-                    print(
-                        "[FSM] gap advance done - approaching wall 2 to "
-                        f"{WALL_APPROACH_TARGET_MM:.0f} mm standoff"
-                    )
+                    print("[FSM] gap advance done - verifying straightaway is clear")
                     motion_handle = None
-                    av["wall_approach_num"] = 2          # second of two wall approaches
-                    av["wall_approach_started_at"] = now
-                    av["wall_inrange_count"] = 0
                     last_status_print_at = now
-                    state = "CP3_APPROACH_WALL"
+                    state = "CP3_VERIFY_STRAIGHTAWAY"
 
         elif state == "CP3_VERIFY_STRAIGHTAWAY":
             # One-shot alignment check: a clear forward cone means we're lined up.
