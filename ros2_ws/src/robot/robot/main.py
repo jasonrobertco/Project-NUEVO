@@ -71,14 +71,6 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # Place the robot at the cp2 spot facing +Y first.  >>> False for a full run <<<
 START_AT_CP2 = False
 
-# TEMP / TESTING-ONLY: True skips EVERYTHING up to checkpoint 3 (scripted cp1/cp2
-# drive + the cone-weave + the wall-referenced cp3 finish) -- BTN_1 resets odometry
-# to the cp3 start pose (0,0, +Y) and jumps straight into the cp3->cp4 LAPF
-# straightaway, so the final leg can be tested on its own. Place the robot at the
-# cp3 spot (start of the finish straightaway) facing +Y first. START_AT_CP2 takes
-# precedence if both are True.  >>> False for a full run <<<
-START_AT_CP3 = False
-
 # ---------------------------------------------------------------------------
 # GREEN-LIGHT AUTO-START (vision-triggered race start)
 # ---------------------------------------------------------------------------
@@ -128,6 +120,25 @@ PIVOT_MAKE_ROOM_NUDGE_MM = 100.0        # per-attempt fore/aft nudge to open roo
 PIVOT_MAKE_ROOM_MAX_TRIES = 3           # nudges before forcing the turn
 PIVOT_MAKE_ROOM_SPEED_MM_S = 80.0       # speed of the make-room nudges
 PIVOT_MAKE_ROOM_TOLERANCE_MM = 25.0     # arrival tolerance for a nudge move
+
+# ---------------------------------------------------------------------------
+# WAYPOINT CORRECTION (snap back to the ideal map pose after a disrupted turn)
+# ---------------------------------------------------------------------------
+# Each scripted step has an IDEAL end pose (IDEAL_POSES, computed by integrating
+# the commanded steps from the start). In a perfect run odometry lands exactly
+# there; a make-room nudge (or a wall bumping the turn) shifts the robot off the
+# ideal line. On flagged steps we MEASURE the odometry pose, compare to the ideal
+# waypoint, and CORRECT back onto it (turn toward it -> drive -> re-face) before
+# continuing. CAVEAT: odometry is the only position sense here (no GPS/absolute
+# ref), so this fixes the nudge/bump displacement it can see, NOT true wheel slip
+# -- which is why it's scoped to the short PRE-BRIDGE corner (where odom is still
+# trustworthy) and the downstream legs stay wall/detection-referenced.
+WAYPOINT_CORRECTION_ENABLED = True       # master switch
+WAYPOINT_POS_TOL_MM = 60.0               # within this of ideal -> no position fix
+WAYPOINT_MAX_CORRECTION_MM = 500.0       # refuse to "correct" a wild deviation (suspect odom)
+WAYPOINT_HEADING_TOL_DEG = 4.0           # within this of ideal heading -> no re-face
+WAYPOINT_CORRECTION_SPEED_MM_S = 100.0   # speed of the corrective drive
+WAYPOINT_CORRECTION_TIMEOUT_S = 8.0      # per-move cap so a correction can't hang
 
 # ===========================================================================
 # CHECKPOINT 1 & 2 LOGIC  (scripted approach + bridge crossing, odometry only)
@@ -356,17 +367,21 @@ class MissionStep:
     label: str
     kind: StepKind
     value: tuple[float, float] | float
-    # tol_deg overrides the turn tolerance for a turn_by step.
+    # correct=True -> after this step, snap the odom pose back to its ideal
+    # waypoint (used on the pre-bridge corner turns that a make-room nudge can
+    # shift off-line). tol_deg overrides the turn tolerance for a turn_by step.
+    correct: bool = False
     tol_deg: float | None = None
 
 
 MISSION_STEPS: tuple[MissionStep, ...] = (
     MissionStep("drive to checkpoint 1 approach", "move_forward", CHECKPOINT_1_APPROACH_DISTANCE_MM),
-    MissionStep("turn right toward bridge lane", "turn_by", RIGHT_ANGLE_TURN_DEG),
+    MissionStep("turn right toward bridge lane", "turn_by", RIGHT_ANGLE_TURN_DEG, correct=True),
     MissionStep("drive into bridge lane", "move_forward", BRIDGE_ALIGN_DISTANCE_MM),
-    # A bit more turn tolerance here (tol_deg) so the face-bridge turn doesn't need
-    # to land tight. (Waypoint correction was removed; no correct=True anywhere now.)
-    MissionStep("turn right to face bridge", "turn_by", RIGHT_ANGLE_TURN_DEG, tol_deg=5.0),
+    # A bit more turn tolerance here (tol_deg) -- the waypoint correction right
+    # after (correct=True) re-faces the ideal heading anyway, so this turn doesn't
+    # need to land tight. (Previously square_to_wall re-fixed it; that's now removed.)
+    MissionStep("turn right to face bridge", "turn_by", RIGHT_ANGLE_TURN_DEG, correct=True, tol_deg=5.0),
 
     # Checkpoint 1 reached here.
     # NOTE: the pre-bridge `square_to_wall` LiDAR heading-square was REMOVED on
@@ -383,6 +398,38 @@ MISSION_STEPS: tuple[MissionStep, ...] = (
     # Checkpoint 2 reached here. Robot should be facing the cones/obstacle
     # course. The FSM switches to LAPF obstacle avoidance after this scripted
     # checkpoint 1/2 sequence finishes.
+)
+
+
+def _compute_ideal_poses(
+    steps: tuple[MissionStep, ...],
+    start_pose: tuple[float, float, float],
+) -> tuple[tuple[float, float, float], ...]:
+    """Ideal odom pose (x_mm, y_mm, theta_deg) AFTER each scripted step.
+
+    Integrates the COMMANDED steps (so it matches what odometry reads in a clean,
+    un-nudged run -- including the 82deg turn convention, not a true 90). Forward
+    motion is along the current heading (x += d*cos, y += d*sin); turns add to
+    theta; square_to_wall is an ideal heading-null (no change). These are the
+    waypoints correct_to_waypoint() snaps back to.
+    """
+    x, y, th = start_pose
+    poses: list[tuple[float, float, float]] = []
+    for step in steps:
+        if step.kind == "move_forward":
+            x += float(step.value) * math.cos(math.radians(th))
+            y += float(step.value) * math.sin(math.radians(th))
+        elif step.kind == "turn_by":
+            th += float(step.value)
+        elif step.kind == "move_to":
+            x, y = step.value  # type: ignore[assignment]
+        # square_to_wall: ideal correction is 0 -> pose unchanged
+        poses.append((x, y, th))
+    return poses
+
+
+IDEAL_POSES: tuple[tuple[float, float, float], ...] = _compute_ideal_poses(
+    MISSION_STEPS, (0.0, 0.0, float(INITIAL_THETA_DEG))
 )
 
 
@@ -828,6 +875,49 @@ def guarded_turn_by(robot: Robot, delta_deg: float, tolerance_deg: float | None 
             break
 
     return robot.turn_by(delta_deg, tolerance_deg=tol, blocking=False)
+
+
+def _wrap_deg(angle_deg: float) -> float:
+    """Wrap an angle to (-180, 180] degrees."""
+    return (angle_deg + 180.0) % 360.0 - 180.0
+
+
+def correct_to_waypoint(robot: Robot, ideal_pose: tuple[float, float, float], label: str) -> None:
+    """Snap the odom pose back onto its ideal waypoint after a disrupted step.
+
+    Measures the current odometry pose, compares to `ideal_pose` (x, y,
+    theta_deg from IDEAL_POSES), and if it has drifted past WAYPOINT_POS_TOL_MM
+    it corrects: turn to face the waypoint (guarded), drive there, then re-face
+    the ideal heading. Bounded by WAYPOINT_MAX_CORRECTION_MM (a larger deviation
+    is treated as suspect odometry and skipped) and a per-move timeout so it can
+    never hang. Blocks for the (short) duration of the correction. See the
+    WAYPOINT_CORRECTION_* constants and the odom-only caveat there.
+    """
+    tx, ty, tth = ideal_pose
+    x, y, th = robot.get_pose()
+    d = math.hypot(tx - x, ty - y)
+
+    if d > WAYPOINT_MAX_CORRECTION_MM:
+        print(f"[waypoint] {label}: deviation {d:.0f} mm > max {WAYPOINT_MAX_CORRECTION_MM:.0f} mm "
+              f"- skipping correction (suspect odometry)")
+        return
+
+    if d > WAYPOINT_POS_TOL_MM:
+        bearing_deg = math.degrees(math.atan2(ty - y, tx - x))
+        print(f"[waypoint] {label}: off ideal by {d:.0f} mm "
+              f"(at {x:.0f},{y:.0f}; want {tx:.0f},{ty:.0f}) - correcting toward waypoint")
+        guarded_turn_by(robot, _wrap_deg(bearing_deg - th)).wait(timeout=WAYPOINT_CORRECTION_TIMEOUT_S)
+        robot.move_forward(d, velocity=WAYPOINT_CORRECTION_SPEED_MM_S,
+                           tolerance=WAYPOINT_POS_TOL_MM, blocking=True,
+                           timeout=WAYPOINT_CORRECTION_TIMEOUT_S)
+    else:
+        print(f"[waypoint] {label}: on ideal ({d:.0f} mm <= {WAYPOINT_POS_TOL_MM:.0f} mm) - no position fix")
+
+    _, _, th_now = robot.get_pose()
+    heading_err = _wrap_deg(tth - th_now)
+    if abs(heading_err) > WAYPOINT_HEADING_TOL_DEG:
+        print(f"[waypoint] {label}: heading off {heading_err:+.0f} deg - re-aligning to {tth:.0f} deg")
+        guarded_turn_by(robot, heading_err).wait(timeout=WAYPOINT_CORRECTION_TIMEOUT_S)
 
 
 def _fit_line_angle_deg(points: list[tuple[float, float]]) -> float | None:
@@ -1360,27 +1450,6 @@ def run(robot: Robot) -> None:
                     )
                     last_status_print_at = now
                     state = "OBSTACLE_AVOIDANCE"
-                elif START_AT_CP3:
-                    # TEMP/testing path: skip cp1/cp2 + the cone-weave + the cp3
-                    # wall finish, and jump straight to the cp3->cp4 LAPF
-                    # straightaway. reset_mission_pose() zeroes odometry to the cp3
-                    # start pose (0,0,+Y). Place the robot at the cp3 spot facing +Y.
-                    reset_mission_pose(robot)
-                    show_running_leds(robot)
-                    step_index = len(MISSION_STEPS)
-                    av = {}
-                    print("[FSM] TEMP START_AT_CP3 - skipping to the cp3 -> cp4 "
-                          "straightaway")
-                    motion_handle = begin_avoidance_segment(
-                        robot,
-                        av,
-                        "checkpoint 3 -> checkpoint 4",
-                        CHECKPOINT_4_DISTANCE_MM,
-                        next_state="CHECKPOINT_5_MANIPULATOR",
-                        now=now,
-                    )
-                    last_status_print_at = now
-                    state = "OBSTACLE_AVOIDANCE"
                 else:
                     reset_mission_pose(robot)
                     show_running_leds(robot)
@@ -1404,6 +1473,13 @@ def run(robot: Robot) -> None:
                     last_status_print_at = now
 
                 if motion_handle is not None and motion_handle.is_finished():
+                    # Before advancing: if this step is flagged, snap the odom
+                    # pose back onto its ideal map waypoint (recovers a make-room
+                    # nudge / wall bump that shifted the corner off-line). Blocks
+                    # briefly; see correct_to_waypoint + the odom-only caveat.
+                    finished_step = MISSION_STEPS[step_index]
+                    if WAYPOINT_CORRECTION_ENABLED and finished_step.correct:
+                        correct_to_waypoint(robot, IDEAL_POSES[step_index], finished_step.label)
                     step_index += 1
                     if step_index >= len(MISSION_STEPS):
                         print_status(robot, len(MISSION_STEPS) - 1)
