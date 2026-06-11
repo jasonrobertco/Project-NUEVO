@@ -353,13 +353,17 @@ WALL_SPAN_DEPTH_BAND_MM = 150.0        # only count returns within this depth of
 WALL_MIN_SPAN_DETECT_MM = 300.0        # min +y span over the ±60° arc to accept as a wall (cone <= ~150)
 WALL_MIN_SPAN_APPROACH_MM = 200.0      # min +y span over the ±150 mm cone to confirm the standoff
 CLEAR_PATH_MIN_MM = 1000.0             # straightaway is "clear" if nearest front return is beyond this
+# CP3_VERIFY recovery: if the straightaway is blocked, rotate in place toward the
+# open side until the front cone clears (then drive), instead of safe-stopping.
+CP3_VERIFY_ROTATE_SPEED_DEG_S = 45.0   # in-place search rotation speed
+CP3_VERIFY_ROTATE_TIMEOUT_S = 10.0     # give up (safe-stop) if no clear heading found in time
 FRONT_CONE_HALF_WIDTH_MM = 150.0       # half-width of the forward cone used to read the wall
 FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading the wall
 # Both turns: SIGN *and* MAGNITUDE need physical verification. FACE_WALL may be
 # ~0 (re-zero wall already ahead) or ~90 (perpendicular finish-side wall);
 # FACE_STRAIGHTAWAY then turns onto the finish straightaway. Set both on the venue.
 CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # face the re-zero wall (SIGN UNVERIFIED)
-CP3_FACE_STRAIGHTAWAY_TURN_DEG = 75.0                 # turn onto the finish straightaway (SIGN UNVERIFIED; own literal, not RIGHT_ANGLE_TURN_DEG, so only this turn is 75 deg)
+CP3_FACE_STRAIGHTAWAY_TURN_DEG = 78.0                 # turn onto the finish straightaway (SIGN UNVERIFIED; own literal, not RIGHT_ANGLE_TURN_DEG, so only this turn is 75 deg)
 
 # Forward "onto the straightaway" move after the post-wall turn (single wall
 # approach -- no wall 2 any more). Open-loop; ends -> verify + drive straightaway.
@@ -1963,8 +1967,9 @@ def run(robot: Robot) -> None:
                     state = "CP3_VERIFY_STRAIGHTAWAY"
 
         elif state == "CP3_VERIFY_STRAIGHTAWAY":
-            # One-shot alignment check: a clear forward cone means we're lined up.
-            # If blocked, stop rather than drive blind.
+            # Alignment check: a clear forward cone means we're lined up. If blocked,
+            # ROTATE in place toward the open side until the front cone clears, then
+            # drive -- recover instead of aborting (was: safe-stop to IDLE).
             if robot.was_button_pressed(Button.BTN_2):
                 robot.stop()
                 motion_handle = None
@@ -1972,32 +1977,33 @@ def run(robot: Robot) -> None:
                 print("[FSM] IDLE - cp3 straightaway verify cancelled")
                 state = "IDLE"
             else:
-                # Position sanity check (LOGGED, WARN only, never blocks): the
-                # re-zero wall should sit ~target away BEHIND and to the LEFT. A
-                # flipped (UNVERIFIED) turn sign shows up as out-of-band/inf -> warn;
-                # the go/no-go still defers to the front-clear gate below.
-                rear = directional_clearance_mm(robot, "rear")
-                left = directional_clearance_mm(robot, "left")
-                lo = WALL_FINISH_SANITY_TARGET_MM - WALL_FINISH_SANITY_BAND_MM
-                hi = WALL_FINISH_SANITY_TARGET_MM + WALL_FINISH_SANITY_BAND_MM
-                rear_str = "inf" if math.isinf(rear) else f"{rear:.0f}"
-                left_str = "inf" if math.isinf(left) else f"{left:.0f}"
-                print(
-                    f"[FSM] cp3 position check: rear={rear_str} mm left={left_str} mm "
-                    f"(want ~{WALL_FINISH_SANITY_TARGET_MM:.0f} mm each, ok {lo:.0f}-{hi:.0f} mm)"
-                )
-                for name, val in (("rear", rear), ("left", left)):
-                    if not (lo <= val <= hi):
-                        val_str = "inf" if math.isinf(val) else f"{val:.0f}"
-                        print(
-                            f"[FSM] WARN cp3 position: {name}={val_str} mm outside "
-                            f"{lo:.0f}-{hi:.0f} mm - check turn sign/standoff "
-                            "(continuing, not aborting)"
-                        )
+                # Position sanity check (LOGGED, WARN only, never blocks) -- done ONCE
+                # on entry so the rotate-to-clear loop below doesn't spam it.
+                if "verify_started_at" not in av:
+                    av["verify_started_at"] = now
+                    rear = directional_clearance_mm(robot, "rear")
+                    left = directional_clearance_mm(robot, "left")
+                    lo = WALL_FINISH_SANITY_TARGET_MM - WALL_FINISH_SANITY_BAND_MM
+                    hi = WALL_FINISH_SANITY_TARGET_MM + WALL_FINISH_SANITY_BAND_MM
+                    rear_str = "inf" if math.isinf(rear) else f"{rear:.0f}"
+                    left_str = "inf" if math.isinf(left) else f"{left:.0f}"
+                    print(
+                        f"[FSM] cp3 position check: rear={rear_str} mm left={left_str} mm "
+                        f"(want ~{WALL_FINISH_SANITY_TARGET_MM:.0f} mm each, ok {lo:.0f}-{hi:.0f} mm)"
+                    )
+                    for name, val in (("rear", rear), ("left", left)):
+                        if not (lo <= val <= hi):
+                            val_str = "inf" if math.isinf(val) else f"{val:.0f}"
+                            print(
+                                f"[FSM] WARN cp3 position: {name}={val_str} mm outside "
+                                f"{lo:.0f}-{hi:.0f} mm - check turn sign/standoff "
+                                "(continuing, not aborting)"
+                            )
 
                 front = front_clearance_mm(robot)
                 front_str = "inf" if math.isinf(front) else f"{front:.0f}"
                 if front >= CLEAR_PATH_MIN_MM:
+                    robot.stop()  # in case we were rotating to find a clear heading
                     print(
                         f"[FSM] straightaway clear (nearest {front_str} mm) - "
                         f"driving {CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM:.0f} mm to checkpoint 3 "
@@ -2005,22 +2011,43 @@ def run(robot: Robot) -> None:
                     )
                     # Velocity-controlled wall-following drive (the
                     # CP3_DRIVE_STRAIGHTAWAY loop steers + tracks distance).
-                    # ORIGINAL (revert here): open-loop fixed-distance move_forward:
-                    #   motion_handle = robot.move_forward(
-                    #       CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM,
-                    #       velocity=DRIVE_VELOCITY_MM_S, tolerance=DRIVE_TOLERANCE_MM,
-                    #       blocking=False)
                     motion_handle = None
+                    av.pop("verify_started_at", None)
+                    av.pop("verify_turn_sign", None)
                     av["drive_start_mm"] = robot.get_odometry_pose()[:2]
                     last_status_print_at = now
                     state = "CP3_DRIVE_STRAIGHTAWAY"
-                else:
+                elif (now - av["verify_started_at"]) >= CP3_VERIFY_ROTATE_TIMEOUT_S:
+                    # Rotated and never found a clear heading -> genuinely boxed in.
+                    av.pop("verify_started_at", None)
+                    av.pop("verify_turn_sign", None)
                     safe_stop_to_idle(
                         robot,
                         f"straightaway blocked ({front_str} mm < {CLEAR_PATH_MIN_MM:.0f} mm) "
-                        "- not aligned",
+                        f"after rotating {CP3_VERIFY_ROTATE_TIMEOUT_S:.0f} s - boxed in",
                     )
                     state = "IDLE"
+                else:
+                    # Blocked: rotate toward the open side (committed once so it
+                    # doesn't flip-flop as the side readings change while turning).
+                    # CCW (+) swings the nose toward the robot's LEFT (+y).
+                    if "verify_turn_sign" not in av:
+                        left = directional_clearance_mm(robot, "left")
+                        right = directional_clearance_mm(robot, "right")
+                        # open side = side with MORE room; inf (fully open) beats
+                        # any finite reading, so a plain >= compares correctly.
+                        av["verify_turn_sign"] = 1 if (left >= right) else -1
+                        print(
+                            f"[FSM] straightaway blocked ({front_str} mm) - rotating "
+                            f"{'CCW/left' if av['verify_turn_sign'] > 0 else 'CW/right'} "
+                            "toward the open side until clear"
+                        )
+                    robot.set_velocity(
+                        0.0, av["verify_turn_sign"] * CP3_VERIFY_ROTATE_SPEED_DEG_S
+                    )
+                    if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
+                        print(f"  cp3 verify rotating: front={front_str} mm (want >= {CLEAR_PATH_MIN_MM:.0f})")
+                        last_status_print_at = now
 
         elif state == "CP3_DRIVE_STRAIGHTAWAY":
             # Velocity-controlled wall-following drive to cp3: each tick steers
