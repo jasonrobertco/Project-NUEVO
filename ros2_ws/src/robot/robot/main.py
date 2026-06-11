@@ -393,7 +393,7 @@ WALL_FINISH_SANITY_BAND_MM = 120.0     # warn if a reading is outside target +/-
 # capped, only when BOTH walls are visible. SIGN UNVERIFIED (set_velocity is
 # CCW-positive); flip if it steers INTO the closer wall.
 CP3_STRAIGHTAWAY_CORRECTION_SIGN = 1               # flip to -1 if it corrects the wrong way
-CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM = 0.08   # deg/s of yaw per mm of error (stronger)
+CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM = 0.06   # deg/s of yaw per mm of error (was 0.08; lowered, slight overcorrection)
 CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S = 20.0       # cap on the yaw correction
 CP3_STRAIGHTAWAY_WALL_MAX_MM = 450.0      # a side reading beyond this is an OPENING/gap, not a wall (don't center off it)
 CP3_STRAIGHTAWAY_FOLLOW_OFFSET_MM = 300.0 # when only one wall is near, hold it at this distance (single-wall follow)
