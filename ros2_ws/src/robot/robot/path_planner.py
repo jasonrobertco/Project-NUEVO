@@ -15,22 +15,6 @@ import math
 import numpy as np
 
 # =============================================================================
-# Body-footprint clearance override (LAPF)
-# =============================================================================
-# The LAPF force is sampled at the virtual target, which eff_radius holds
-# ~300 mm clear of any cone. The real body is never evaluated, so it can sweep
-# into a cone the virtual target has comfortably cleared. These constants drive
-# an ADDITIVE override (LeashedAPFPlanner.navigate_to_goal -> _apply_body_clearance)
-# that steers/slows the BODY off a cone it is about to contact. It does not
-# remove or retune the APF, eff_radius, leash, or escape. The footprint is
-# anchored at the FRONT EDGE (fwd=0), matching the obstacle-cloud frame
-# (LIDAR_MOUNT_X_MM=0): fwd in [-ROBOT_BODY_LENGTH_MM, 0], left in +/-half-width.
-ROBOT_BODY_LENGTH_MM      = 400.0
-ROBOT_BODY_HALF_WIDTH_MM  = 200.0   # do NOT raise toward 225 without re-checking the 610 mm corridor: 2*(75+225) > 610 closes it
-BODY_CLEARANCE_TRIGGER_MM = 130.0   # start reacting when a cone edge is within this of the footprint
-BODY_CLEARANCE_STOP_MM    = 30.0    # at/below this, linear floors and it turns away hardest
-
-# =============================================================================
 # Base class
 # =============================================================================
 
@@ -454,79 +438,6 @@ class LeashedAPFPlanner:
         target = self.update_virtual_target(pose, goal, obstacles, dt)
         linear, angular = self._tracker.compute_velocity_to_point(pose, target, self._max_linear)
         linear *= self._forward_speed_scale(pose, obstacles)
-        linear, angular = self._apply_body_clearance(pose, obstacles, linear, angular)
-        return linear, angular
-
-    def _apply_body_clearance(
-        self,
-        pose: tuple[float, float, float],
-        obstacles: np.ndarray,
-        linear: float,
-        angular: float,
-    ) -> tuple[float, float]:
-        """Additive body-footprint clearance override.
-
-        The APF samples force at the virtual target, which ``eff_radius`` keeps
-        ~300 mm clear of any cone; the real body is never evaluated and can sweep
-        into a cone the target has cleared. This override models the robot as a
-        rectangle anchored at the front edge (fwd in [-LENGTH, 0], left in
-        +/-HALF_WIDTH, matching the cloud frame) and, when the nearest cone is
-        within ``BODY_CLEARANCE_TRIGGER_MM`` of that rectangle, ADDS a yaw away
-        from the cone and scales ``linear`` down. It composes with the
-        pure-pursuit command (never overwrites it) and is inert when nothing is
-        within the trigger, so open-field behavior is identical. Reuses the disks
-        already fetched for this tick — no re-fetch.
-        """
-        obs = np.asarray(obstacles, dtype=float)
-        if obs.ndim != 2 or obs.shape[0] == 0:
-            return linear, angular
-
-        px, py, theta = pose
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-
-        nearest_clearance = float("inf")
-        nearest_left = 0.0
-        for row in obs:
-            ox = float(row[0])
-            oy = float(row[1])
-            radius = float(row[2]) if row.shape[0] >= 3 else 0.0
-            dx = ox - px
-            dy = oy - py
-            fwd = cos_t * dx + sin_t * dy
-            left = -sin_t * dx + cos_t * dy
-            # Nearest point on the footprint rectangle to the cone center.
-            clamped_fwd = min(0.0, max(-ROBOT_BODY_LENGTH_MM, fwd))
-            clamped_left = min(ROBOT_BODY_HALF_WIDTH_MM, max(-ROBOT_BODY_HALF_WIDTH_MM, left))
-            clearance = math.hypot(fwd - clamped_fwd, left - clamped_left) - radius
-            if clearance < nearest_clearance:
-                nearest_clearance = clearance
-                nearest_left = left
-
-        if nearest_clearance >= BODY_CLEARANCE_TRIGGER_MM:
-            return linear, angular
-
-        span = BODY_CLEARANCE_TRIGGER_MM - BODY_CLEARANCE_STOP_MM
-        if span <= 1e-6:
-            t = 1.0
-        else:
-            t = (BODY_CLEARANCE_TRIGGER_MM - nearest_clearance) / span
-            t = max(0.0, min(1.0, t))
-
-        # Steer away from the cone's lateral side. Positive angular = CCW (left),
-        # matching the pure-pursuit convention. Cone on the left (left >= 0) ->
-        # steer right (negative); cone on the right (left < 0) -> steer left
-        # (positive). Add to the existing angular, then clamp to the planner's max.
-        side = -1.0 if nearest_left >= 0.0 else 1.0
-        added_yaw = side * t * self._max_angular
-        angular = max(-self._max_angular, min(self._max_angular, angular + added_yaw))
-
-        # Floor linear at 20% of the pure-pursuit value — never reverses, never
-        # fully zero, so the robot keeps creeping off the cone while it turns.
-        lin_scale = (1.0 - t) + t * 0.2
-        linear *= lin_scale
-
-        print(f"[lapf-body] nearest cone clearance={nearest_clearance:.0f}mm t={t:.2f} -> yaw{added_yaw:+.2f} lin x{lin_scale:.2f}")
         return linear, angular
 
     def _forward_speed_scale(
