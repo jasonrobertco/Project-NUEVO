@@ -121,6 +121,25 @@ PIVOT_MAKE_ROOM_MAX_TRIES = 3           # nudges before forcing the turn
 PIVOT_MAKE_ROOM_SPEED_MM_S = 80.0       # speed of the make-room nudges
 PIVOT_MAKE_ROOM_TOLERANCE_MM = 25.0     # arrival tolerance for a nudge move
 
+# ---------------------------------------------------------------------------
+# WAYPOINT CORRECTION (snap back to the ideal map pose after a disrupted turn)
+# ---------------------------------------------------------------------------
+# Each scripted step has an IDEAL end pose (IDEAL_POSES, computed by integrating
+# the commanded steps from the start). In a perfect run odometry lands exactly
+# there; a make-room nudge (or a wall bumping the turn) shifts the robot off the
+# ideal line. On flagged steps we MEASURE the odometry pose, compare to the ideal
+# waypoint, and CORRECT back onto it (turn toward it -> drive -> re-face) before
+# continuing. CAVEAT: odometry is the only position sense here (no GPS/absolute
+# ref), so this fixes the nudge/bump displacement it can see, NOT true wheel slip
+# -- which is why it's scoped to the short PRE-BRIDGE corner (where odom is still
+# trustworthy) and the downstream legs stay wall/detection-referenced.
+WAYPOINT_CORRECTION_ENABLED = True       # master switch
+WAYPOINT_POS_TOL_MM = 60.0               # within this of ideal -> no position fix
+WAYPOINT_MAX_CORRECTION_MM = 500.0       # refuse to "correct" a wild deviation (suspect odom)
+WAYPOINT_HEADING_TOL_DEG = 4.0           # within this of ideal heading -> no re-face
+WAYPOINT_CORRECTION_SPEED_MM_S = 100.0   # speed of the corrective drive
+WAYPOINT_CORRECTION_TIMEOUT_S = 8.0      # per-move cap so a correction can't hang
+
 # ===========================================================================
 # CHECKPOINT 1 & 2 LOGIC  (scripted approach + bridge crossing, odometry only)
 # ===========================================================================
@@ -348,18 +367,29 @@ class MissionStep:
     label: str
     kind: StepKind
     value: tuple[float, float] | float
+    # correct=True -> after this step, snap the odom pose back to its ideal
+    # waypoint (used on the pre-bridge corner turns that a make-room nudge can
+    # shift off-line). tol_deg overrides the turn tolerance for a turn_by step.
+    correct: bool = False
+    tol_deg: float | None = None
 
 
 MISSION_STEPS: tuple[MissionStep, ...] = (
     MissionStep("drive to checkpoint 1 approach", "move_forward", CHECKPOINT_1_APPROACH_DISTANCE_MM),
-    MissionStep("turn right toward bridge lane", "turn_by", RIGHT_ANGLE_TURN_DEG),
+    MissionStep("turn right toward bridge lane", "turn_by", RIGHT_ANGLE_TURN_DEG, correct=True),
     MissionStep("drive into bridge lane", "move_forward", BRIDGE_ALIGN_DISTANCE_MM),
-    MissionStep("turn right to face bridge", "turn_by", RIGHT_ANGLE_TURN_DEG),
+    # A bit more turn tolerance here (tol_deg) -- the waypoint correction right
+    # after (correct=True) re-faces the ideal heading anyway, so this turn doesn't
+    # need to land tight. (Previously square_to_wall re-fixed it; that's now removed.)
+    MissionStep("turn right to face bridge", "turn_by", RIGHT_ANGLE_TURN_DEG, correct=True, tol_deg=5.0),
 
     # Checkpoint 1 reached here.
-    # Re-reference heading against the bridge-mouth walls before the long
-    # open-loop crossing, so turn error doesn't drift us off the ramp.
-    MissionStep("square up to bridge axis", "square_to_wall", 0.0),
+    # NOTE: the pre-bridge `square_to_wall` LiDAR heading-square was REMOVED on
+    # purpose -- wall detection is now used ONLY in the post-bridge obstacle-course
+    # approach + cp3 finish, nowhere else. Heading into the bridge now rests on the
+    # guarded turn + the step-4 waypoint correction (odometry), not the walls. The
+    # 2350 mm crossing is open-loop, so any residual turn error shows up as lateral
+    # drift on the ramp -- watch this on the first run now that the square-up is gone.
     MissionStep("cross bridge", "move_forward", BRIDGE_CROSS_DISTANCE_MM),
     MissionStep("turn left after bridge", "turn_by", -RIGHT_ANGLE_TURN_DEG),
     MissionStep("drive past bridge exit toward obstacle section", "move_forward", BRIDGE_EXIT_DISTANCE_MM),
@@ -368,6 +398,38 @@ MISSION_STEPS: tuple[MissionStep, ...] = (
     # Checkpoint 2 reached here. Robot should be facing the cones/obstacle
     # course. The FSM switches to LAPF obstacle avoidance after this scripted
     # checkpoint 1/2 sequence finishes.
+)
+
+
+def _compute_ideal_poses(
+    steps: tuple[MissionStep, ...],
+    start_pose: tuple[float, float, float],
+) -> tuple[tuple[float, float, float], ...]:
+    """Ideal odom pose (x_mm, y_mm, theta_deg) AFTER each scripted step.
+
+    Integrates the COMMANDED steps (so it matches what odometry reads in a clean,
+    un-nudged run -- including the 82deg turn convention, not a true 90). Forward
+    motion is along the current heading (x += d*cos, y += d*sin); turns add to
+    theta; square_to_wall is an ideal heading-null (no change). These are the
+    waypoints correct_to_waypoint() snaps back to.
+    """
+    x, y, th = start_pose
+    poses: list[tuple[float, float, float]] = []
+    for step in steps:
+        if step.kind == "move_forward":
+            x += float(step.value) * math.cos(math.radians(th))
+            y += float(step.value) * math.sin(math.radians(th))
+        elif step.kind == "turn_by":
+            th += float(step.value)
+        elif step.kind == "move_to":
+            x, y = step.value  # type: ignore[assignment]
+        # square_to_wall: ideal correction is 0 -> pose unchanged
+        poses.append((x, y, th))
+    return poses
+
+
+IDEAL_POSES: tuple[tuple[float, float, float], ...] = _compute_ideal_poses(
+    MISSION_STEPS, (0.0, 0.0, float(INITIAL_THETA_DEG))
 )
 
 
@@ -522,7 +584,7 @@ def start_step(robot: Robot, step: MissionStep):
     if step.kind == "turn_by":
         # Collision-aware: make room for the pivot first, then turn (forces the
         # turn with a loud warning if it can't clear). See guarded_turn_by.
-        return guarded_turn_by(robot, step.value)
+        return guarded_turn_by(robot, step.value, tolerance_deg=step.tol_deg)
 
     if step.kind == "square_to_wall":
         # Measure the heading error against the bridge-mouth walls and null it.
@@ -778,7 +840,7 @@ def _make_room_for_pivot(robot: Robot, tight_axis: str, swept_radius_mm: float) 
     return True
 
 
-def guarded_turn_by(robot: Robot, delta_deg: float):
+def guarded_turn_by(robot: Robot, delta_deg: float, tolerance_deg: float | None = None):
     """Collision-aware replacement for robot.turn_by() on scripted 90-deg turns.
 
     Before pivoting, checks whether the swept footprint is clear (pivot_blocked).
@@ -787,10 +849,12 @@ def guarded_turn_by(robot: Robot, delta_deg: float):
     (by design) and prints a loud warning so the collision risk is visible in the
     console. Returns the non-blocking MotionHandle for the actual pivot, so the
     FSM keeps polling and BTN_2 still cancels during the rotation itself; only the
-    short make-room nudges block.
+    short make-room nudges block. tolerance_deg overrides the default turn
+    tolerance (per-step, e.g. a looser tolerance on the face-bridge turn).
     """
+    tol = TURN_TOLERANCE_DEG if tolerance_deg is None else tolerance_deg
     if not PIVOT_GUARD_ENABLED:
-        return robot.turn_by(delta_deg, tolerance_deg=TURN_TOLERANCE_DEG, blocking=False)
+        return robot.turn_by(delta_deg, tolerance_deg=tol, blocking=False)
 
     swept = FOOTPRINT_HALF_DIAG_MM + PIVOT_CLEARANCE_MARGIN_MM
     side = "right" if delta_deg >= 0 else "left"
@@ -810,7 +874,50 @@ def guarded_turn_by(robot: Robot, delta_deg: float):
                   f"nearest {gap:.0f} mm) !!!")
             break
 
-    return robot.turn_by(delta_deg, tolerance_deg=TURN_TOLERANCE_DEG, blocking=False)
+    return robot.turn_by(delta_deg, tolerance_deg=tol, blocking=False)
+
+
+def _wrap_deg(angle_deg: float) -> float:
+    """Wrap an angle to (-180, 180] degrees."""
+    return (angle_deg + 180.0) % 360.0 - 180.0
+
+
+def correct_to_waypoint(robot: Robot, ideal_pose: tuple[float, float, float], label: str) -> None:
+    """Snap the odom pose back onto its ideal waypoint after a disrupted step.
+
+    Measures the current odometry pose, compares to `ideal_pose` (x, y,
+    theta_deg from IDEAL_POSES), and if it has drifted past WAYPOINT_POS_TOL_MM
+    it corrects: turn to face the waypoint (guarded), drive there, then re-face
+    the ideal heading. Bounded by WAYPOINT_MAX_CORRECTION_MM (a larger deviation
+    is treated as suspect odometry and skipped) and a per-move timeout so it can
+    never hang. Blocks for the (short) duration of the correction. See the
+    WAYPOINT_CORRECTION_* constants and the odom-only caveat there.
+    """
+    tx, ty, tth = ideal_pose
+    x, y, th = robot.get_pose()
+    d = math.hypot(tx - x, ty - y)
+
+    if d > WAYPOINT_MAX_CORRECTION_MM:
+        print(f"[waypoint] {label}: deviation {d:.0f} mm > max {WAYPOINT_MAX_CORRECTION_MM:.0f} mm "
+              f"- skipping correction (suspect odometry)")
+        return
+
+    if d > WAYPOINT_POS_TOL_MM:
+        bearing_deg = math.degrees(math.atan2(ty - y, tx - x))
+        print(f"[waypoint] {label}: off ideal by {d:.0f} mm "
+              f"(at {x:.0f},{y:.0f}; want {tx:.0f},{ty:.0f}) - correcting toward waypoint")
+        guarded_turn_by(robot, _wrap_deg(bearing_deg - th)).wait(timeout=WAYPOINT_CORRECTION_TIMEOUT_S)
+        robot.move_forward(d, velocity=WAYPOINT_CORRECTION_SPEED_MM_S,
+                           tolerance=WAYPOINT_POS_TOL_MM, blocking=True,
+                           timeout=WAYPOINT_CORRECTION_TIMEOUT_S)
+    else:
+        print(f"[waypoint] {label}: on ideal ({d:.0f} mm <= {WAYPOINT_POS_TOL_MM:.0f} mm) - no position fix")
+
+    _, _, th_now = robot.get_pose()
+    heading_err = _wrap_deg(tth - th_now)
+    if abs(heading_err) > WAYPOINT_HEADING_TOL_DEG:
+        print(f"[waypoint] {label}: heading off {heading_err:+.0f} deg - re-aligning to {tth:.0f} deg")
+        guarded_turn_by(robot, heading_err).wait(timeout=WAYPOINT_CORRECTION_TIMEOUT_S)
 
 
 def _fit_line_angle_deg(points: list[tuple[float, float]]) -> float | None:
@@ -1366,6 +1473,13 @@ def run(robot: Robot) -> None:
                     last_status_print_at = now
 
                 if motion_handle is not None and motion_handle.is_finished():
+                    # Before advancing: if this step is flagged, snap the odom
+                    # pose back onto its ideal map waypoint (recovers a make-room
+                    # nudge / wall bump that shifted the corner off-line). Blocks
+                    # briefly; see correct_to_waypoint + the odom-only caveat.
+                    finished_step = MISSION_STEPS[step_index]
+                    if WAYPOINT_CORRECTION_ENABLED and finished_step.correct:
+                        correct_to_waypoint(robot, IDEAL_POSES[step_index], finished_step.label)
                     step_index += 1
                     if step_index >= len(MISSION_STEPS):
                         print_status(robot, len(MISSION_STEPS) - 1)
@@ -1821,9 +1935,12 @@ def run(robot: Robot) -> None:
                         last_status_print_at = now
 
         elif state == "CHECKPOINT_5_MANIPULATOR":
-            # Robot is stopped at checkpoint 4. Run the manipulator scaffold once,
-            # then return to IDLE. (Placeholder/untuned — see function docstring.)
-            run_manipulator_placeholder(robot)
+            # Robot is stopped at checkpoint 4. cp5 manipulator is DISABLED for now
+            # -- we just stop at the finish line and go idle. Re-enable by
+            # uncommenting run_manipulator_placeholder() below.
+            # run_manipulator_placeholder(robot)
+            print("[FSM] CHECKPOINT 4 finish - cp5 manipulator disabled, stopping")
+            robot.stop()
             motion_handle = None
             show_idle_leds(robot)
             print("[FSM] IDLE - press BTN_1 to run again")
