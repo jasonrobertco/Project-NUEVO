@@ -342,6 +342,15 @@ WALL_APPROACH_TIMEOUT_S = 16.0         # watchdog for the approach drive (not un
 # logged so the real standoff is visible; TIMEOUT is the backstop if it never settles.
 WALL_APPROACH_BAND_MM = 50.0           # in-range window is [TARGET-BAND, TARGET], e.g. 375-425 mm
 WALL_APPROACH_CONFIRM_FRAMES = 3       # consecutive in-range front reads required before turning
+
+# --- Wall-likeness gate: reject locking the cp3 wall detect/approach onto an
+# isolated cone. A flat wall returns points spanning a wide lateral width; a cone
+# is a narrow isolated cluster (<= ~150 mm, the disk-radius clamp diameter, and
+# usually less at LiDAR height). We measure the lateral span (max-min +y) of raw
+# returns AT the nearest object's depth and require it to exceed a minimum.
+WALL_SPAN_DEPTH_BAND_MM = 150.0        # only count returns within this depth of the nearest (excludes a far wall behind a near cone)
+WALL_MIN_SPAN_DETECT_MM = 300.0        # min +y span over the ±60° arc to accept as a wall (cone <= ~150)
+WALL_MIN_SPAN_APPROACH_MM = 200.0      # min +y span over the ±150 mm cone to confirm the standoff
 CLEAR_PATH_MIN_MM = 1000.0             # straightaway is "clear" if nearest front return is beyond this
 FRONT_CONE_HALF_WIDTH_MM = 150.0       # half-width of the forward cone used to read the wall
 FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading the wall
@@ -716,10 +725,52 @@ def front_clearance_mm(
     return nearest
 
 
+def forward_span_mm(
+    robot: Robot,
+    candidate_dist_mm: float,
+    half_width_mm: float | None = None,
+    half_arc_deg: float | None = None,
+    depth_band_mm: float = WALL_SPAN_DEPTH_BAND_MM,
+    max_range_mm: float = FRONT_CLEARANCE_MAX_RANGE_MM,
+) -> float:
+    """Lateral extent (max-min +y) of forward returns at ~candidate_dist_mm.
+
+    Wall-likeness metric: a flat wall returns points spanning a wide lateral
+    width; an isolated cone spans only ~its diameter. Keeps raw-cloud points
+    ahead (px>0) inside the window (a ±half_width_mm lateral cone and/or a
+    ±half_arc_deg angular arc, whichever is given) whose RANGE sits within
+    [candidate-1, candidate+depth_band] -- i.e. at the nearest object's surface,
+    so a far wall BEHIND a near cone does not inflate the span. Returns the +y
+    span, or 0.0 if < 2 such points. Same raw cloud / body axes as
+    front_clearance_mm (fwd=+x, left=+y).
+    """
+    if not math.isfinite(candidate_dist_mm):
+        return 0.0
+    half_rad = math.radians(half_arc_deg) if half_arc_deg is not None else None
+    lo = candidate_dist_mm - 1.0
+    hi = candidate_dist_mm + depth_band_mm
+    laterals = []
+    for px, py in robot.get_obstacles():
+        if px <= 0.0 or px > max_range_mm:
+            continue
+        if half_width_mm is not None and abs(py) > half_width_mm:
+            continue
+        if half_rad is not None and abs(math.atan2(py, px)) > half_rad:
+            continue
+        rng = math.hypot(px, py)
+        if rng < lo or rng > hi:
+            continue
+        laterals.append(py)
+    if len(laterals) < 2:
+        return 0.0
+    return max(laterals) - min(laterals)
+
+
 def wall_ahead_clearance_mm(
     robot: Robot,
     half_arc_deg: float = WALL_DETECT_ARC_HALF_DEG,
     max_range_mm: float = FRONT_CLEARANCE_MAX_RANGE_MM,
+    min_lateral_span_mm: float | None = None,
 ) -> float:
     """Nearest raw-cloud return within a WIDE forward arc, by straight-line range.
 
@@ -748,6 +799,13 @@ def wall_ahead_clearance_mm(
             continue
         if rng < nearest:
             nearest = rng
+    # Wall-likeness gate: if the nearest arc return is a narrow isolated object
+    # (cone), its lateral span at that depth is small -> report no wall (inf) so
+    # the cp3 turn can't fire on it.
+    if min_lateral_span_mm is not None and math.isfinite(nearest):
+        span = forward_span_mm(robot, nearest, half_arc_deg=half_arc_deg, max_range_mm=max_range_mm)
+        if span < min_lateral_span_mm:
+            return math.inf
     return nearest
 
 
@@ -1605,7 +1663,10 @@ def run(robot: Robot) -> None:
                     #      along-axis progress, so a lower-field cone can't trigger it.
                     # cp3->cp4 leaves terminate_on_wall False (goal-coordinate stop).
                     detect_wall = av.get("terminate_on_wall")
-                    front = wall_ahead_clearance_mm(robot) if detect_wall else math.inf
+                    front = (
+                        wall_ahead_clearance_mm(robot, min_lateral_span_mm=WALL_MIN_SPAN_DETECT_MM)
+                        if detect_wall else math.inf
+                    )
                     fire_turn = False
                     if front <= WALL_DETECT_STANDOFF_MM:
                         advance = advance_along_axis_mm(robot, av)
@@ -1767,16 +1828,24 @@ def run(robot: Robot) -> None:
             else:
                 front = front_clearance_mm(robot)
                 in_lower = WALL_APPROACH_TARGET_MM - WALL_APPROACH_BAND_MM
-                # "In range" = at/under the target but no nearer than the band's
-                # lower edge -- keeps the variable stop distance honest before turning.
-                in_range = in_lower <= front <= WALL_APPROACH_TARGET_MM
+                # Wall-likeness: the standoff is only valid if the return at this
+                # distance spans a wall-like lateral width across the front cone;
+                # an isolated cone (narrow span) must not confirm the turn.
+                wall_span = (
+                    forward_span_mm(robot, front, half_width_mm=FRONT_CONE_HALF_WIDTH_MM)
+                    if math.isfinite(front) else 0.0
+                )
+                wall_like = wall_span >= WALL_MIN_SPAN_APPROACH_MM
+                in_band = in_lower <= front <= WALL_APPROACH_TARGET_MM
+                # "In range" = in the standoff band AND wall-like.
+                in_range = in_band and wall_like
 
                 if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
                     x, y, theta = robot.get_pose()
                     front_str = "inf" if math.isinf(front) else f"{front:.0f}"
                     print(
                         f"  cp3 wall approach odom=({x:6.0f}, {y:6.0f}) mm "
-                        f"theta={theta:5.1f} deg front={front_str} mm "
+                        f"theta={theta:5.1f} deg front={front_str} mm span={wall_span:.0f} mm "
                         f"(want {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm, "
                         f"in-range {av['wall_inrange_count']}/{WALL_APPROACH_CONFIRM_FRAMES})"
                     )
@@ -1796,6 +1865,14 @@ def run(robot: Robot) -> None:
                         motion_handle = guarded_turn_by(robot, CP3_FACE_STRAIGHTAWAY_TURN_DEG)
                         last_status_print_at = now
                         state = "CP3_FACE_STRAIGHTAWAY"
+                elif in_band and not wall_like:
+                    # Nearest return is in the standoff band but too narrow (span <
+                    # min) to be the wall -- likely an isolated cone. Hold and keep
+                    # sampling; do NOT confirm or creep into it. The detect-side gate
+                    # should prevent squaring up to a cone in the first place; this is
+                    # the approach-side safety net.
+                    robot.stop()
+                    av["wall_inrange_count"] = 0
                 # TIMEOUT DISABLED: the approach no longer safe-stops if the wall is
                 # slow to appear -- it keeps creeping (incl. the inf case below) until
                 # the standoff is reached; BTN_2 is the only stop. To re-enable,
