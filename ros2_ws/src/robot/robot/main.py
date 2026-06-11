@@ -156,10 +156,10 @@ WAYPOINT_CORRECTION_TIMEOUT_S = 8.0      # per-move cap so a correction can't ha
 # Scripted distances -- EMPIRICALLY HAND-TUNED on the physical bridge/ramp, not
 # derived from the course grid. Don't change without re-tuning on the venue; the
 # cp1/2 sequence is meant to stay behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 2850.0   # start -> checkpoint 1 approach point
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 2420.0            # length of the bridge/ramp crossing
-BRIDGE_EXIT_DISTANCE_MM = 600.0              # post-bridge corner hop (hand-tuned, not a tile)
+BRIDGE_CROSS_DISTANCE_MM = 2450.0            # length of the bridge/ramp crossing
+BRIDGE_EXIT_DISTANCE_MM = 900.0              # post-bridge corner hop (hand-tuned, not a tile)
 
 # --- Bridge-entry wall-square correction -----------------------------------
 # The bridge is crossed open-loop over a long distance, so heading error from
