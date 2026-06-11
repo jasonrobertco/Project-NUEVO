@@ -383,8 +383,10 @@ WALL_FINISH_SANITY_BAND_MM = 120.0     # warn if a reading is outside target +/-
 # capped, only when BOTH walls are visible. SIGN UNVERIFIED (set_velocity is
 # CCW-positive); flip if it steers INTO the closer wall.
 CP3_STRAIGHTAWAY_CORRECTION_SIGN = 1               # flip to -1 if it corrects the wrong way
-CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM = 0.05   # deg/s of yaw per mm of left-right imbalance
-CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S = 15.0       # cap on the yaw correction (gentle, no oscillation)
+CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM = 0.08   # deg/s of yaw per mm of error (stronger)
+CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S = 20.0       # cap on the yaw correction
+CP3_STRAIGHTAWAY_WALL_MAX_MM = 450.0      # a side reading beyond this is an OPENING/gap, not a wall (don't center off it)
+CP3_STRAIGHTAWAY_FOLLOW_OFFSET_MM = 300.0 # when only one wall is near, hold it at this distance (single-wall follow)
 
 
 # ===========================================================================
@@ -2086,11 +2088,24 @@ def run(robot: Robot) -> None:
                     left = directional_clearance_mm(robot, "left")
                     right = directional_clearance_mm(robot, "right")
                     behind = directional_clearance_mm(robot, "rear")
-                    # Center between the side walls: steer toward the side with more
-                    # room (positive error = more room on the left). Only when BOTH
-                    # walls are seen; off a single wall we can't center, so go straight.
-                    if math.isfinite(left) and math.isfinite(right):
-                        error = left - right
+                    # A side reading beyond WALL_MAX is an OPENING/gap, not a wall --
+                    # centering off it chases the gap and pins the far wall (the
+                    # failure in the log). Center only when BOTH sides show a real
+                    # (near) wall; if only one does, FOLLOW it at a fixed offset; if
+                    # neither, go straight.
+                    left_wall = math.isfinite(left) and left <= CP3_STRAIGHTAWAY_WALL_MAX_MM
+                    right_wall = math.isfinite(right) and right <= CP3_STRAIGHTAWAY_WALL_MAX_MM
+                    if left_wall and right_wall:
+                        error = left - right                              # center between walls
+                    elif right_wall:
+                        error = CP3_STRAIGHTAWAY_FOLLOW_OFFSET_MM - right  # hold right wall at offset
+                    elif left_wall:
+                        error = left - CP3_STRAIGHTAWAY_FOLLOW_OFFSET_MM   # hold left wall at offset
+                    else:
+                        error = None
+                    if error is None:
+                        correction = 0.0
+                    else:
                         correction = (
                             CP3_STRAIGHTAWAY_CORRECTION_SIGN
                             * CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM
@@ -2100,9 +2115,6 @@ def run(robot: Robot) -> None:
                             -CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S,
                             min(CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S, correction),
                         )
-                    else:
-                        error = None
-                        correction = 0.0
                     robot.set_velocity(DRIVE_VELOCITY_MM_S, correction)
 
                     if now - last_status_print_at >= STATUS_PRINT_INTERVAL_S:
