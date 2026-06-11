@@ -332,7 +332,7 @@ CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM   # 4 tiles (2440 mm); end wall
 # WALL_APPROACH_TARGET_MM = 475.0      # prior: +125 mm total backoff
 # WALL_APPROACH_TARGET_MM = 700.0      # revert here: doubled-ish standoff, stopped too far
 # WALL_APPROACH_TARGET_MM = 300.0      # revert here: prior standoff, in-range band [250, 300] mm
-WALL_APPROACH_TARGET_MM = 225.0        # stop this far from the wall (re-zero); in-range band [175, 225] mm (75 mm closer)
+WALL_APPROACH_TARGET_MM = 300.0        # stop this far from the wall (re-zero); in-range band [175, 225] mm (75 mm closer)
 # WALL_APPROACH_SPEED_MM_S = 80.0      # revert here: too slow, timed out ~640 mm short
 WALL_APPROACH_SPEED_MM_S = 150.0       # closed-loop approach speed (closes the full ~1300 mm in time)
 # WALL_APPROACH_TIMEOUT_S = 8.0        # revert here: too short to close the full distance
@@ -359,7 +359,7 @@ FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading
 # ~0 (re-zero wall already ahead) or ~90 (perpendicular finish-side wall);
 # FACE_STRAIGHTAWAY then turns onto the finish straightaway. Set both on the venue.
 CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # face the re-zero wall (SIGN UNVERIFIED)
-CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish straightaway (SIGN UNVERIFIED)
+CP3_FACE_STRAIGHTAWAY_TURN_DEG = 75.0                 # turn onto the finish straightaway (SIGN UNVERIFIED; own literal, not RIGHT_ANGLE_TURN_DEG, so only this turn is 75 deg)
 
 # Forward "onto the straightaway" move after the post-wall turn (single wall
 # approach -- no wall 2 any more). Open-loop; ends -> verify + drive straightaway.
