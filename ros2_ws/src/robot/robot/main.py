@@ -8,9 +8,10 @@ cancels any active motion (including mid-recovery) and returns to IDLE.
 Route -- an odometry-only scripted drive to checkpoint 2, then LiDAR/LAPF
 obstacle avoidance for the later sections:
 
-  CP1/CP2 (scripted, odometry only):
-    drive -> turn R -> drive -> turn R           (cp1: facing the bridge mouth)
-    square to bridge axis -> cross bridge ->
+  CP1/CP2 (PART1_NAV_MODE):
+    closed_loop — odom drives/turns + LiDAR square at bridge mouth (fewer knobs)
+    scripted    — original guarded turns + waypoint correction (PART1_NAV_MODE)
+    drive -> turn R -> drive -> square(LiDAR) -> turn R -> square -> cross bridge ->
     turn L -> drive -> turn L                     (cp2: facing the cones)
   CP3 (LiDAR): obstacle-avoid up the field (LAPF), square to the outer wall and
     approach a fixed standoff (re-zero vs an absolute reference, not drifted
@@ -61,7 +62,7 @@ RIGHT_WHEEL_DIR_INVERTED = False
 
 # Default scripted-drive speeds/tolerances.
 DRIVE_VELOCITY_MM_S = 140.0
-DRIVE_TOLERANCE_MM = 60.0
+DRIVE_TOLERANCE_MM = 70.0
 TURN_TOLERANCE_DEG = 3.0
 STATUS_PRINT_INTERVAL_S = 0.5
 
@@ -70,6 +71,14 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # cp2->cp3 leg, so the LiDAR weave can be tested without the full approach.
 # Place the robot at the cp2 spot facing +Y first.  >>> False for a full run <<<
 START_AT_CP2 = True
+
+# ---------------------------------------------------------------------------
+# PART 1 NAVIGATION MODE (cp1 -> cp2, bridge approach)
+# ---------------------------------------------------------------------------
+# "closed_loop" — fewer knobs: odom drives + LiDAR squares heading at the bridge
+# mouth (reuses estimate_bridge_heading_error_deg). No pivot-guard nudges, no
+# waypoint correction. "scripted" — original MISSION_STEPS + guarded_turn_by.
+PART1_NAV_MODE = "closed_loop"
 
 # ---------------------------------------------------------------------------
 # GREEN-LIGHT AUTO-START (vision-triggered race start)
@@ -116,10 +125,11 @@ RIGHT_ANGLE_TURN_DEG = 82.0
 PIVOT_GUARD_ENABLED = True              # master switch (False = plain blind turns)
 FOOTPRINT_HALF_DIAG_MM = 400.0          # robot center -> farthest corner (MEASURED)
 PIVOT_CLEARANCE_MARGIN_MM = 40.0        # safety pad added to the swept radius
-PIVOT_MAKE_ROOM_NUDGE_MM = 100.0        # per-attempt fore/aft nudge to open room
-PIVOT_MAKE_ROOM_MAX_TRIES = 3           # nudges before forcing the turn
+PIVOT_MAKE_ROOM_NUDGE_MM = 40.0        # per-attempt fore/aft nudge to open room
+PIVOT_MAKE_ROOM_MAX_TRIES = 2           # nudges before forcing the turn
 PIVOT_MAKE_ROOM_SPEED_MM_S = 80.0       # speed of the make-room nudges
-PIVOT_MAKE_ROOM_TOLERANCE_MM = 25.0     # arrival tolerance for a nudge move
+PIVOT_MAKE_ROOM_TOLERANCE_MM = 15.0     # arrival tolerance for a nudge move
+PIVOT_MAKE_ROOM_MIN_NUDGE_MM = 15.0     # skip tiny moves that don't help
 
 # ---------------------------------------------------------------------------
 # WAYPOINT CORRECTION (snap back to the ideal map pose after a disrupted turn)
@@ -432,6 +442,74 @@ MISSION_STEPS: tuple[MissionStep, ...] = (
     # course. The FSM switches to LAPF obstacle avoidance after this scripted
     # checkpoint 1/2 sequence finishes.
 )
+
+# Simpler cp1->cp2 sequence: drive/turn use wheel odometry; "square" uses LiDAR
+# side-wall fits to null heading error before entering / crossing the bridge.
+Part1Step = tuple[str, str, float | None]  # (kind, label, value_mm_or_deg)
+
+PART1_STEPS: tuple[Part1Step, ...] = (
+    ("drive", "approach checkpoint 1", CHECKPOINT_1_APPROACH_DISTANCE_MM),
+    ("turn", "turn right toward bridge lane", RIGHT_ANGLE_TURN_DEG),
+    ("drive", "drive into bridge lane", BRIDGE_ALIGN_DISTANCE_MM),
+    ("square", "square heading to lane (LiDAR)", None),
+    ("turn", "turn right to face bridge", RIGHT_ANGLE_TURN_DEG),
+    ("square", "square heading before crossing (LiDAR)", None),
+    ("drive", "cross bridge", BRIDGE_CROSS_DISTANCE_MM),
+    ("turn", "turn left after bridge", -RIGHT_ANGLE_TURN_DEG),
+    ("drive", "drive past bridge exit", BRIDGE_EXIT_DISTANCE_MM),
+    ("turn", "turn left toward obstacle course", -RIGHT_ANGLE_TURN_DEG),
+)
+
+
+class _DoneHandle:
+    """Motion handle that is already complete (e.g. LiDAR square within deadband)."""
+
+    def cancel(self) -> None:
+        pass
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return True
+
+    def is_finished(self) -> bool:
+        return True
+
+
+_DONE_HANDLE = _DoneHandle()
+
+
+def _active_part1_steps() -> tuple[Part1Step, ...] | tuple[MissionStep, ...]:
+    return PART1_STEPS if PART1_NAV_MODE == "closed_loop" else MISSION_STEPS
+
+
+def start_part1_step(robot: Robot, step: Part1Step):
+    """Start one closed-loop part-1 step (plain odom + LiDAR square, no pivot guard)."""
+    kind, label, value = step
+    print(f"[part1] {label}")
+
+    if kind == "drive":
+        return robot.move_forward(
+            float(value),
+            velocity=DRIVE_VELOCITY_MM_S,
+            tolerance=DRIVE_TOLERANCE_MM,
+            blocking=False,
+        )
+
+    if kind == "turn":
+        return robot.turn_by(
+            float(value),
+            tolerance_deg=TURN_TOLERANCE_DEG,
+            blocking=False,
+        )
+
+    if kind == "square":
+        err = estimate_bridge_heading_error_deg(robot)
+        if abs(err) < BRIDGE_SQUARE_DEADBAND_DEG:
+            print(f"[part1] heading already square ({err:+.1f} deg)")
+            return _DONE_HANDLE
+        print(f"[part1] LiDAR square-up: heading error {err:+.1f} deg")
+        return robot.turn_by(-err, tolerance_deg=2.0, blocking=False)
+
+    raise ValueError(f"unknown part1 step kind: {kind!r}")
 
 
 def _compute_ideal_poses(
@@ -887,35 +965,53 @@ def _make_room_for_pivot(robot: Robot, tight_axis: str, swept_radius_mm: float) 
 
     Differential drive can't strafe, so the only way to make room is to
     translate along the heading. Retreat AWAY from the obstruction: back up when
-    it's ahead, drive forward when it's behind, and for a side obstruction pick
-    whichever of fore/aft currently has more room. The nudge is capped at
-    PIVOT_MAKE_ROOM_NUDGE_MM and only fires if that direction is itself clear
-    (so making room can't cause a new collision); if the preferred direction is
-    blocked it tries the other. Returns True if it moved, False if neither
-    direction is safe. Blocks for the (short) duration of the nudge.
+    it's ahead, drive forward when it's behind. For a side obstruction we prefer
+    backing up first -- driving forward often pushes the rear into obstacles
+  behind the robot (common at bridge-lane corners).
+
+    Each direction is capped so the opposite end still leaves swept_radius +
+    margin clear after the nudge (rear-guarded). Returns True if it moved.
     """
     front = directional_clearance_mm(robot, "front", half_width_mm=swept_radius_mm)
     rear = directional_clearance_mm(robot, "rear", half_width_mm=swept_radius_mm)
-    need = PIVOT_MAKE_ROOM_NUDGE_MM + PIVOT_CLEARANCE_MARGIN_MM
+    reserve = swept_radius_mm + PIVOT_CLEARANCE_MARGIN_MM
+    max_forward_nudge = max(0.0, rear - reserve)
+    max_backward_nudge = max(0.0, front - reserve)
+    min_nudge = PIVOT_MAKE_ROOM_MIN_NUDGE_MM
 
     if tight_axis == "front":
         go_forward = False
+        max_nudge = max_backward_nudge
     elif tight_axis == "rear":
         go_forward = True
-    else:  # left/right obstruction: retreat toward the roomier end
-        go_forward = front >= rear
-
-    avail = front if go_forward else rear
-    if avail < need:
-        go_forward = not go_forward          # preferred retreat blocked; try the other way
-        avail = front if go_forward else rear
-        if avail < need:
+        max_nudge = max_forward_nudge
+    else:
+        # Side blocked: prefer backward so we don't overshoot into the lane mouth
+        # with the rear clipping obstacles behind us.
+        if max_backward_nudge >= min_nudge:
+            go_forward = False
+            max_nudge = max_backward_nudge
+        elif max_forward_nudge >= min_nudge:
+            go_forward = True
+            max_nudge = max_forward_nudge
+        else:
             return False
 
-    nudge = min(PIVOT_MAKE_ROOM_NUDGE_MM, avail - PIVOT_CLEARANCE_MARGIN_MM)
+    if max_nudge < min_nudge:
+        alt_forward = not go_forward
+        alt_max = max_forward_nudge if alt_forward else max_backward_nudge
+        if alt_max < min_nudge:
+            return False
+        go_forward = alt_forward
+        max_nudge = alt_max
+
+    nudge = min(PIVOT_MAKE_ROOM_NUDGE_MM, max_nudge)
     direction = "forward" if go_forward else "backward"
-    print(f"[guard-turn] making room: nudging {direction} {nudge:.0f} mm "
-          f"(front {front:.0f} mm, rear {rear:.0f} mm)")
+    print(
+        f"[guard-turn] making room: nudging {direction} {nudge:.0f} mm "
+        f"(front {front:.0f} mm, rear {rear:.0f} mm; "
+        f"safe fwd {max_forward_nudge:.0f} / back {max_backward_nudge:.0f})"
+    )
     mover = robot.move_forward if go_forward else robot.move_backward
     mover(nudge, velocity=PIVOT_MAKE_ROOM_SPEED_MM_S,
           tolerance=PIVOT_MAKE_ROOM_TOLERANCE_MM, blocking=True)
@@ -1376,10 +1472,12 @@ def run_manipulator_placeholder(robot: Robot) -> None:
 
 def print_status(robot: Robot, step_index: int) -> None:
     x, y, theta = robot.get_odometry_pose()
-    step = MISSION_STEPS[step_index]
+    steps = _active_part1_steps()
+    step = steps[step_index]
+    label = step[1] if PART1_NAV_MODE == "closed_loop" else step.label
     print(
-        f"  step={step_index + 1}/{len(MISSION_STEPS)} "
-        f"{step.label} "
+        f"  step={step_index + 1}/{len(steps)} "
+        f"{label} "
         f"odom=({x:6.0f}, {y:6.0f}) mm "
         f"theta={theta:5.1f} deg"
     )
@@ -1473,10 +1571,16 @@ def run(robot: Robot) -> None:
                       "(or press BTN_1); BTN_2 to cancel")
             else:
                 print("[FSM] IDLE - press BTN_1 to start checkpoint 3 mission, BTN_2 to cancel")
-            print(
-                f"[CFG] scripted steps ({len(MISSION_STEPS)}): "
-                + ", ".join(step.label for step in MISSION_STEPS)
-            )
+            if PART1_NAV_MODE == "closed_loop":
+                print(
+                    f"[CFG] part1 closed-loop ({len(PART1_STEPS)} steps): "
+                    + " -> ".join(s[1] for s in PART1_STEPS)
+                )
+            else:
+                print(
+                    f"[CFG] part1 scripted ({len(MISSION_STEPS)} steps): "
+                    + ", ".join(step.label for step in MISSION_STEPS)
+                )
             print(
                 "[CFG] checkpoint 2+ obstacle avoidance: "
                 f"cp3_approach={CHECKPOINT_3_APPROACH_DISTANCE_MM:.0f} mm "
@@ -1566,9 +1670,15 @@ def run(robot: Robot) -> None:
                     show_running_leds(robot)
                     step_index = 0
                     av = {}
-                    motion_handle = start_step(robot, MISSION_STEPS[step_index])
+                    steps = _active_part1_steps()
+                    if PART1_NAV_MODE == "closed_loop":
+                        motion_handle = start_part1_step(robot, PART1_STEPS[step_index])
+                        first_label = PART1_STEPS[0][1]
+                    else:
+                        motion_handle = start_step(robot, MISSION_STEPS[step_index])
+                        first_label = MISSION_STEPS[0].label
                     last_status_print_at = now
-                    print(f"[FSM] MOVING - started step 1/{len(MISSION_STEPS)}: {MISSION_STEPS[0].label}")
+                    print(f"[FSM] MOVING - started step 1/{len(steps)}: {first_label}")
                     state = "MOVING"
 
         elif state == "MOVING":
@@ -1584,16 +1694,17 @@ def run(robot: Robot) -> None:
                     last_status_print_at = now
 
                 if motion_handle is not None and motion_handle.is_finished():
-                    # Before advancing: if this step is flagged, snap the odom
-                    # pose back onto its ideal map waypoint (recovers a make-room
-                    # nudge / wall bump that shifted the corner off-line). Blocks
-                    # briefly; see correct_to_waypoint + the odom-only caveat.
-                    finished_step = MISSION_STEPS[step_index]
-                    if WAYPOINT_CORRECTION_ENABLED and finished_step.correct:
-                        correct_to_waypoint(robot, IDEAL_POSES[step_index], finished_step.label)
+                    steps = _active_part1_steps()
+                    if PART1_NAV_MODE == "scripted":
+                        # Snap odom back onto ideal waypoint after flagged steps.
+                        finished_step = MISSION_STEPS[step_index]
+                        if WAYPOINT_CORRECTION_ENABLED and finished_step.correct:
+                            correct_to_waypoint(
+                                robot, IDEAL_POSES[step_index], finished_step.label
+                            )
                     step_index += 1
-                    if step_index >= len(MISSION_STEPS):
-                        print_status(robot, len(MISSION_STEPS) - 1)
+                    if step_index >= len(steps):
+                        print_status(robot, len(steps) - 1)
                         print("[FSM] CHECKPOINT 2 - starting obstacle avoidance toward checkpoint 3")
                         motion_handle = begin_avoidance_segment(
                             robot,
@@ -1606,10 +1717,16 @@ def run(robot: Robot) -> None:
                         )
                         last_status_print_at = now
                         state = "OBSTACLE_AVOIDANCE"
+                    elif PART1_NAV_MODE == "closed_loop":
+                        motion_handle = start_part1_step(robot, PART1_STEPS[step_index])
+                        print(
+                            f"[FSM] MOVING - started step {step_index + 1}/{len(steps)}: "
+                            f"{PART1_STEPS[step_index][1]}"
+                        )
                     else:
                         motion_handle = start_step(robot, MISSION_STEPS[step_index])
                         print(
-                            f"[FSM] MOVING - started step {step_index + 1}/{len(MISSION_STEPS)}: "
+                            f"[FSM] MOVING - started step {step_index + 1}/{len(steps)}: "
                             f"{MISSION_STEPS[step_index].label}"
                         )
 
