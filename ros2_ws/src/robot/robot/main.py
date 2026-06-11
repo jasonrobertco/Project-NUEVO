@@ -89,6 +89,10 @@ GREEN_START_CONFIRM_FRAMES = 5
 GREEN_START_MIN_CONFIDENCE = 0.50
 # Treat vision as unavailable if no detections have arrived within this window.
 GREEN_START_VISION_STALE_SEC = 3.0
+# While idling, print what the camera currently sees (red / green / none) this
+# often, so we can confirm the traffic-light detection is alive on the field.
+# The readout persists until a green light or BTN_1 starts the mission.
+IDLE_LIGHT_PRINT_INTERVAL_S = 2.0
 
 # Calibrated command for a physical 90-deg turn: a raw 90.0 overshoots by ~10
 # deg, so this is reduced to land on a true right angle. One knob for ALL
@@ -96,13 +100,34 @@ GREEN_START_VISION_STALE_SEC = 3.0
 # it still turns too far, raise if it falls short.
 RIGHT_ANGLE_TURN_DEG = 82.0
 
+# ---------------------------------------------------------------------------
+# COLLISION-AWARE TURNS (guarded pivot)
+# ---------------------------------------------------------------------------
+# A scripted 90-deg turn is an in-place PIVOT: the base spins about its center
+# at zero forward velocity (navigation._turn_to_heading). Its CORNERS sweep a
+# circle of radius FOOTPRINT_HALF_DIAG_MM (center -> farthest corner), so any
+# obstacle inside that circle gets clipped no matter how it turns -- the turn
+# itself can't dodge, the robot has to first translate away. guarded_turn_by()
+# checks the swept circle against the live LiDAR cloud and, if blocked, NUDGES
+# fore/aft to open room, then pivots. If it still can't clear, it FORCES the
+# turn anyway and prints a loud warning -- by design, so a tight course turn is
+# never silently skipped. Flip PIVOT_GUARD_ENABLED to False to revert to the
+# old blind turns instantly on the field.
+PIVOT_GUARD_ENABLED = True              # master switch (False = plain blind turns)
+FOOTPRINT_HALF_DIAG_MM = 400.0          # robot center -> farthest corner (MEASURED)
+PIVOT_CLEARANCE_MARGIN_MM = 40.0        # safety pad added to the swept radius
+PIVOT_MAKE_ROOM_NUDGE_MM = 100.0        # per-attempt fore/aft nudge to open room
+PIVOT_MAKE_ROOM_MAX_TRIES = 3           # nudges before forcing the turn
+PIVOT_MAKE_ROOM_SPEED_MM_S = 80.0       # speed of the make-room nudges
+PIVOT_MAKE_ROOM_TOLERANCE_MM = 25.0     # arrival tolerance for a nudge move
+
 # ===========================================================================
 # CHECKPOINT 1 & 2 LOGIC  (scripted approach + bridge crossing, odometry only)
 # ===========================================================================
 # Scripted distances -- EMPIRICALLY HAND-TUNED on the physical bridge/ramp, not
 # derived from the course grid. Don't change without re-tuning on the venue; the
 # cp1/2 sequence is meant to stay behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 3000.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
 BRIDGE_CROSS_DISTANCE_MM = 2350.0            # length of the bridge/ramp crossing
 BRIDGE_EXIT_DISTANCE_MM = 600.0              # post-bridge corner hop (hand-tuned, not a tile)
@@ -433,6 +458,34 @@ def green_light_visible(robot: Robot) -> bool:
     return False
 
 
+def current_light_color(robot: Robot) -> str:
+    """What the camera sees right now: "red", "green", or "none".
+
+    Diagnostic counterpart to green_light_visible() -- reads the same cached
+    /vision/detections, keeps "traffic light" detections above
+    GREEN_START_MIN_CONFIDENCE, and reports the highest-confidence one's color.
+    "green" wins ties so it never disagrees with the auto-start check. Returns
+    "none" when vision is stale or nothing confident is in view.
+    """
+    if not robot.is_vision_active(timeout_s=GREEN_START_VISION_STALE_SEC):
+        return "none"
+
+    best_color = "none"
+    best_conf = -1.0
+    for detection in robot.get_detections("traffic light"):
+        conf = float(detection["confidence"])
+        if conf < GREEN_START_MIN_CONFIDENCE:
+            continue
+        color = detection.get("attributes", {}).get("color", {}).get("value")
+        if color not in ("red", "green"):
+            continue
+        # Prefer the most confident reading; on a tie, prefer green.
+        if conf > best_conf or (conf == best_conf and color == "green"):
+            best_color = color
+            best_conf = conf
+    return best_color
+
+
 def cancel_motion(robot: Robot, handle) -> None:
     if handle is not None:
         handle.cancel()
@@ -467,11 +520,9 @@ def start_step(robot: Robot, step: MissionStep):
         )
 
     if step.kind == "turn_by":
-        return robot.turn_by(
-            step.value,
-            tolerance_deg=TURN_TOLERANCE_DEG,
-            blocking=False,
-        )
+        # Collision-aware: make room for the pivot first, then turn (forces the
+        # turn with a loud warning if it can't clear). See guarded_turn_by.
+        return guarded_turn_by(robot, step.value)
 
     if step.kind == "square_to_wall":
         # Measure the heading error against the bridge-mouth walls and null it.
@@ -658,6 +709,110 @@ def directional_clearance_mm(
     return nearest
 
 
+def pivot_blocked(robot: Robot, swept_radius_mm: float) -> tuple[bool, str, float]:
+    """Is the in-place pivot footprint obstructed?
+
+    An in-place rotation sweeps the robot's corners through a circle of radius
+    `swept_radius_mm` (center -> farthest corner + margin). Any obstacle inside
+    that circle gets clipped by a corner, so a pivot is unsafe whenever the
+    nearest raw-cloud return in ANY direction is closer than the swept radius.
+
+    Reads the four body-frame cones (front/rear/left/right) via
+    directional_clearance_mm with a half-width = swept radius, so together the
+    four cones tile the plane around the robot. Returns
+    (blocked, tightest_axis, nearest_gap_mm); nearest_gap is +inf (blocked
+    False) when nothing is within the swept circle on any side. Uses the same
+    self-footprint-excluded raw cloud as the other clearance reads, so the
+    robot's own structure never trips it.
+    """
+    gaps = {
+        axis: directional_clearance_mm(
+            robot, axis,
+            half_width_mm=swept_radius_mm,
+            max_range_mm=swept_radius_mm,
+        )
+        for axis in ("front", "rear", "left", "right")
+    }
+    tight_axis = min(gaps, key=gaps.get)
+    gap = gaps[tight_axis]
+    return gap < swept_radius_mm, tight_axis, gap
+
+
+def _make_room_for_pivot(robot: Robot, tight_axis: str, swept_radius_mm: float) -> bool:
+    """Nudge the base fore/aft to open up the pivot circle on the blocked side.
+
+    Differential drive can't strafe, so the only way to make room is to
+    translate along the heading. Retreat AWAY from the obstruction: back up when
+    it's ahead, drive forward when it's behind, and for a side obstruction pick
+    whichever of fore/aft currently has more room. The nudge is capped at
+    PIVOT_MAKE_ROOM_NUDGE_MM and only fires if that direction is itself clear
+    (so making room can't cause a new collision); if the preferred direction is
+    blocked it tries the other. Returns True if it moved, False if neither
+    direction is safe. Blocks for the (short) duration of the nudge.
+    """
+    front = directional_clearance_mm(robot, "front", half_width_mm=swept_radius_mm)
+    rear = directional_clearance_mm(robot, "rear", half_width_mm=swept_radius_mm)
+    need = PIVOT_MAKE_ROOM_NUDGE_MM + PIVOT_CLEARANCE_MARGIN_MM
+
+    if tight_axis == "front":
+        go_forward = False
+    elif tight_axis == "rear":
+        go_forward = True
+    else:  # left/right obstruction: retreat toward the roomier end
+        go_forward = front >= rear
+
+    avail = front if go_forward else rear
+    if avail < need:
+        go_forward = not go_forward          # preferred retreat blocked; try the other way
+        avail = front if go_forward else rear
+        if avail < need:
+            return False
+
+    nudge = min(PIVOT_MAKE_ROOM_NUDGE_MM, avail - PIVOT_CLEARANCE_MARGIN_MM)
+    direction = "forward" if go_forward else "backward"
+    print(f"[guard-turn] making room: nudging {direction} {nudge:.0f} mm "
+          f"(front {front:.0f} mm, rear {rear:.0f} mm)")
+    mover = robot.move_forward if go_forward else robot.move_backward
+    mover(nudge, velocity=PIVOT_MAKE_ROOM_SPEED_MM_S,
+          tolerance=PIVOT_MAKE_ROOM_TOLERANCE_MM, blocking=True)
+    return True
+
+
+def guarded_turn_by(robot: Robot, delta_deg: float):
+    """Collision-aware replacement for robot.turn_by() on scripted 90-deg turns.
+
+    Before pivoting, checks whether the swept footprint is clear (pivot_blocked).
+    If blocked, makes room by nudging fore/aft (up to PIVOT_MAKE_ROOM_MAX_TRIES
+    times) and re-checks. If room still can't be made, it FORCES the turn anyway
+    (by design) and prints a loud warning so the collision risk is visible in the
+    console. Returns the non-blocking MotionHandle for the actual pivot, so the
+    FSM keeps polling and BTN_2 still cancels during the rotation itself; only the
+    short make-room nudges block.
+    """
+    if not PIVOT_GUARD_ENABLED:
+        return robot.turn_by(delta_deg, tolerance_deg=TURN_TOLERANCE_DEG, blocking=False)
+
+    swept = FOOTPRINT_HALF_DIAG_MM + PIVOT_CLEARANCE_MARGIN_MM
+    side = "right" if delta_deg >= 0 else "left"
+    for attempt in range(PIVOT_MAKE_ROOM_MAX_TRIES + 1):
+        blocked, axis, gap = pivot_blocked(robot, swept)
+        if not blocked:
+            if attempt > 0:
+                print(f"[guard-turn] {side} {delta_deg:+.0f} deg: clear after {attempt} "
+                      f"nudge(s) (nearest {gap:.0f} mm >= swept {swept:.0f} mm) - turning")
+            break
+        print(f"[guard-turn] {side} {delta_deg:+.0f} deg BLOCKED (try {attempt}/"
+              f"{PIVOT_MAKE_ROOM_MAX_TRIES}): nearest obstacle {gap:.0f} mm on {axis} "
+              f"side < swept radius {swept:.0f} mm")
+        if attempt >= PIVOT_MAKE_ROOM_MAX_TRIES or not _make_room_for_pivot(robot, axis, swept):
+            print(f"[guard-turn] !!! could not clear the pivot - FORCING the {side} "
+                  f"{delta_deg:+.0f} deg turn anyway (collision risk on {axis} side, "
+                  f"nearest {gap:.0f} mm) !!!")
+            break
+
+    return robot.turn_by(delta_deg, tolerance_deg=TURN_TOLERANCE_DEG, blocking=False)
+
+
 def _fit_line_angle_deg(points: list[tuple[float, float]]) -> float | None:
     """Principal-axis angle of a 2D point set, in degrees, CCW from robot +x.
 
@@ -811,11 +966,7 @@ def start_cp3_terminal_maneuver(robot: Robot):
     termination and the goal-coordinate fallback).
     """
     print("[FSM] checkpoint 3 approach done - squaring up to the outer wall")
-    return robot.turn_by(
-        CP3_FACE_WALL_TURN_DEG,
-        tolerance_deg=TURN_TOLERANCE_DEG,
-        blocking=False,
-    )
+    return guarded_turn_by(robot, CP3_FACE_WALL_TURN_DEG)
 
 
 def perturbed_goal_mm(
@@ -1084,6 +1235,7 @@ def run(robot: Robot) -> None:
     step_index = 0
     last_status_print_at = 0.0
     green_streak = 0  # consecutive IDLE frames seeing green (auto-start confirm)
+    last_light_print_at = 0.0  # throttles the IDLE traffic-light readout
 
     period = 1.0 / float(DEFAULT_FSM_HZ)
     next_tick = time.monotonic()
@@ -1156,6 +1308,15 @@ def run(robot: Robot) -> None:
                         green_start = True
                 else:
                     green_streak = 0
+
+            # Heartbeat: show what the camera currently sees so we can confirm
+            # detection is alive. Persists every IDLE_LIGHT_PRINT_INTERVAL_S until
+            # a green light or BTN_1 leaves IDLE (handled just below).
+            if now - last_light_print_at >= IDLE_LIGHT_PRINT_INTERVAL_S:
+                light = current_light_color(robot)
+                seen = {"green": "GREEN light", "red": "RED light"}.get(light, "no light")
+                print(f"[FSM] IDLE - detecting: {seen}")
+                last_light_print_at = now
 
             if button_start or green_start:
                 green_streak = 0
@@ -1440,11 +1601,7 @@ def run(robot: Robot) -> None:
                             f"at {front:.0f} mm (within {in_lower:.0f}-{WALL_APPROACH_TARGET_MM:.0f} mm "
                             f"for {WALL_APPROACH_CONFIRM_FRAMES} reads) - turning"
                         )
-                        motion_handle = robot.turn_by(
-                            CP3_FACE_STRAIGHTAWAY_TURN_DEG,
-                            tolerance_deg=TURN_TOLERANCE_DEG,
-                            blocking=False,
-                        )
+                        motion_handle = guarded_turn_by(robot, CP3_FACE_STRAIGHTAWAY_TURN_DEG)
                         last_status_print_at = now
                         state = "CP3_FACE_STRAIGHTAWAY"
                 # TIMEOUT DISABLED: the approach no longer safe-stops if the wall is
