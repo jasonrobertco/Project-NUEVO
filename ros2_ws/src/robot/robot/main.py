@@ -69,7 +69,7 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # resets odometry to the cp2 start pose (0,0, +Y) and jumps straight into the
 # cp2->cp3 leg, so the LiDAR weave can be tested without the full approach.
 # Place the robot at the cp2 spot facing +Y first.  >>> False for a full run <<<
-START_AT_CP2 = False
+START_AT_CP2 = True
 
 # ---------------------------------------------------------------------------
 # GREEN-LIGHT AUTO-START (vision-triggered race start)
@@ -146,7 +146,7 @@ WAYPOINT_CORRECTION_TIMEOUT_S = 8.0      # per-move cap so a correction can't ha
 # Scripted distances -- EMPIRICALLY HAND-TUNED on the physical bridge/ramp, not
 # derived from the course grid. Don't change without re-tuning on the venue; the
 # cp1/2 sequence is meant to stay behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 3000.0   # start -> checkpoint 1 approach point
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
 BRIDGE_CROSS_DISTANCE_MM = 2350.0            # length of the bridge/ramp crossing
 BRIDGE_EXIT_DISTANCE_MM = 600.0              # post-bridge corner hop (hand-tuned, not a tile)
