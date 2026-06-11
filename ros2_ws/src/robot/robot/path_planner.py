@@ -374,6 +374,7 @@ class LeashedAPFPlanner:
         leash_length_mm: float = 400.0,
         leash_half_angle_deg: float = 60.0,
         inflation_margin_mm: float = 200.0,
+        robot_half_width_mm: float = 200.0,
         tracker_lookahead_mm: float = 150.0,
         slow_clearance_start_mm: float = 450.0,
         slow_clearance_stop_mm: float = 150.0,
@@ -391,6 +392,7 @@ class LeashedAPFPlanner:
         self._leash_length = float(leash_length_mm)
         self._leash_half_angle = math.radians(float(leash_half_angle_deg))
         self._inflation_margin = float(inflation_margin_mm)
+        self._half_width = float(robot_half_width_mm)
         # Forward-clearance throttle (mild slowdown near a dead-ahead obstacle so
         # the steering has time to swing clear). Scales the LINEAR command only;
         # angular is untouched, and the floor (min_speed_frac) keeps the robot
@@ -551,7 +553,7 @@ class LeashedAPFPlanner:
                 ox = float(row[0])
                 oy = float(row[1])
                 radius = float(row[2]) if row.shape[0] >= 3 else 0.0
-                eff_radius = radius + self._inflation_margin
+                eff_radius = radius + self._inflation_margin + self._half_width
                 away = np.array([vx - ox, vy - oy], dtype=float)
                 center_dist = float(np.linalg.norm(away))
                 if center_dist <= 1e-6:

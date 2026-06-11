@@ -1077,6 +1077,7 @@ class NavigationMixin:
             leash_length_mm=leash_length_mm,
             leash_half_angle_deg=leash_half_angle_deg,
             inflation_margin_mm=inflation_margin_mm,
+            robot_half_width_mm=200.0,   # Robot is 400 mm wide; body half-width now in eff_radius
             tracker_lookahead_mm=tracker_lookahead_mm,
             slow_clearance_start_mm=slow_clearance_start_mm,
             slow_clearance_stop_mm=slow_clearance_stop_mm,
@@ -1087,6 +1088,7 @@ class NavigationMixin:
             repulsion_range_mm
             + leash_length_mm
             + inflation_margin_mm
+            + 200.0   # robot half-width (now part of eff_radius)
             + float(self.APF_TRACK_INPUT_MARGIN_MM)
         )
 

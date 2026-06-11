@@ -210,14 +210,18 @@ LAPF_REPULSION_GAIN = 550.0
 LAPF_ATTRACTION_GAIN = 3.0
 LAPF_FORCE_EMA_ALPHA = 0.35
 
-# --- Cone keep-out + arc-not-pivot (COUPLED -- inflation & leash move together) ---
-# Geometry that must hold: the leash can place the virtual target OUTSIDE the
-# inflated cone, i.e. reach = leash_length*sin(half_angle) >= eff_radius.
-#   reach = 500*sin(45) = 354 mm >= eff_radius = r_track(<=75) + 230 = 305 mm  (49 mm headroom)
-# >>> DON'T narrow the leash or raise inflation without re-checking this, or the
-#     target gets re-trapped inside the bubble (nose-in). <<<
-# LAPF_INFLATION_MARGIN_MM = 250.0      # revert here: oversized ~325 mm keep-out
-LAPF_INFLATION_MARGIN_MM = 230.0        # ~280-305 mm keep-out; body-to-cone clearance ~63-88 mm
+# --- Cone keep-out + arc-not-pivot (COUPLED -- inflation, half-width & leash) ---
+# The planner now bakes the robot half-width (200 mm) into the keep-out:
+#   eff_radius = r_track + LAPF_INFLATION_MARGIN_MM + 200
+# so INFLATION is now a TRUE safety margin only -- it EQUALS the body-edge-to-cone
+# clearance once r_track ~= the physical cone radius.
+# HARD geometry at 75 mm cones / 610 mm spacing (only ~30 mm/side of slack exists):
+#   point-corridor open  : 2*eff_radius < 610  -> eff_radius < 305 -> inflation < 30
+#   leash reach          : 500*sin(45)=354 >= eff_radius
+#   inflation=25 -> eff_radius=300 -> corridor +10 mm, body clearance ~25 mm/side
+# >>> Raising inflation past ~30 (or the cone clamp past 55) CLOSES the corridor
+#     and the planner can't thread. Centering precision matters more than margin. <<<
+LAPF_INFLATION_MARGIN_MM = 25.0          # = body-edge-to-cone clearance per side (~25 mm; 30 mm is the physical max)
 # LAPF_LEASH_HALF_ANGLE_DEG = 50.0      # revert here: wide leash -> target off-axis -> pivot
 LAPF_LEASH_HALF_ANGLE_DEG = 45.0        # steering authority to swing around a dead-ahead cone
 
@@ -254,7 +258,7 @@ NO_PROGRESS_EPS_MM = 50.0
 WALLCLOCK_CAP_FACTOR = 1.5
 WALLCLOCK_CAP_FLOOR_S = 12.0
 SEGMENT_HARD_CEILING_S = 35.0
-MAX_AVOIDANCE_RETRIES = 2
+MAX_AVOIDANCE_RETRIES = 3
 
 # RECOVERY_REVERSE_MM = 300.0            # revert here: exceeded ~150 mm forward gain -> walked backward
 RECOVERY_REVERSE_MM = 100.0              # nominal back-up distance (small, so a retry can't net rearward)
@@ -271,6 +275,18 @@ RECOVERY_REVERSE_TIMEOUT_S = 3.0
 RECOVERY_HEADING_OFFSET_DEG = 25.0       # ~leash half-angle, to reaim the cone
 RECOVERY_REORIENT_TIMEOUT_S = 2.0
 RECOVERY_LATERAL_OFFSET_MM = 275.0       # ~inflation_margin + max disk radius
+# Guaranteed physical displacement per retry. A between-cones force-null stall
+# triggers only the 25 deg reorient pivot (no translation) + a goal shift, so the
+# next LAPF run can re-walk into the SAME minimum. After the reorient turn the
+# robot is angled toward recovery_sign's open side; a short forward hop then
+# translates it off the stalled line onto a different approach line. Alternates
+# L/R via recovery_sign. (Diff-drive can't strafe, so this is a forward-lateral
+# dogleg; lateral component ~= nudge*sin(RECOVERY_HEADING_OFFSET_DEG).)
+RECOVERY_LATERAL_NUDGE_MM = 125.0        # forward hop after reorient (100-150 mm)
+RECOVERY_NUDGE_SPEED_MM_S = 100.0
+RECOVERY_NUDGE_TOLERANCE_MM = 40.0
+RECOVERY_NUDGE_TIMEOUT_S = 3.0
+RECOVERY_NUDGE_MIN_FRONT_MM = 250.0      # skip the hop if less than this is clear ahead
 REAR_SECTOR_HALF_ANGLE_DEG = 60.0        # +/- around directly-behind
 
 # Slack over the LAPF goal tolerance when confirming a finished LAPF handle
@@ -1229,6 +1245,35 @@ def reissue_after_recovery(robot: Robot, av: dict, now: float):
     return handle
 
 
+def start_recovery_nudge(robot: Robot, av: dict, now: float):
+    """Physically displace the robot onto a new approach line before re-issuing.
+
+    Guarded forward hop so the body actually moves each retry (not just pivots).
+    Skips the hop only if something is close dead-ahead (that case already
+    reversed) so it never drives into a cone. Returns (next_state, handle).
+    """
+    front = front_clearance_mm(robot)
+    if front <= RECOVERY_NUDGE_MIN_FRONT_MM:
+        print(
+            f"[FSM] recovery {av['retry_count']}/{MAX_AVOIDANCE_RETRIES}: "
+            f"skipping lateral nudge (front {front:.0f} mm) - re-issuing LAPF"
+        )
+        return "OBSTACLE_AVOIDANCE", reissue_after_recovery(robot, av, now)
+    print(
+        f"[FSM] recovery {av['retry_count']}/{MAX_AVOIDANCE_RETRIES}: "
+        f"lateral nudge {RECOVERY_LATERAL_NUDGE_MM:.0f} mm "
+        f"(sign {av['recovery_sign']:+d}, front {front:.0f} mm)"
+    )
+    av["recovery_started_at"] = now
+    handle = robot.move_forward(
+        RECOVERY_LATERAL_NUDGE_MM,
+        velocity=RECOVERY_NUDGE_SPEED_MM_S,
+        tolerance=RECOVERY_NUDGE_TOLERANCE_MM,
+        blocking=False,
+    )
+    return "OBSTACLE_RECOVERY_NUDGE", handle
+
+
 def run_manipulator_placeholder(robot: Robot) -> None:
     """Checkpoint 5 scaffold: aim + fire one ball with PLACEHOLDER values.
 
@@ -1651,6 +1696,28 @@ def run(robot: Robot) -> None:
                     state = "IDLE"
                 elif reorient_done or reorient_timeout:
                     if not reorient_done:
+                        cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    state, motion_handle = start_recovery_nudge(robot, av, now)
+                    last_status_print_at = now
+
+        elif state == "OBSTACLE_RECOVERY_NUDGE":
+            if robot.was_button_pressed(Button.BTN_2):
+                cancel_motion(robot, motion_handle)
+                motion_handle = None
+                show_idle_leds(robot)
+                print("[FSM] IDLE - recovery nudge cancelled")
+                state = "IDLE"
+            else:
+                nudge_done = motion_handle is not None and motion_handle.is_finished()
+                nudge_timeout = (now - av["recovery_started_at"]) >= RECOVERY_NUDGE_TIMEOUT_S
+                if (now - av["started_at"]) >= SEGMENT_HARD_CEILING_S:
+                    cancel_motion(robot, motion_handle)
+                    motion_handle = None
+                    safe_stop_to_idle(robot, f"LAPF failed ({av['label']}) - segment timeout in recovery")
+                    state = "IDLE"
+                elif nudge_done or nudge_timeout:
+                    if not nudge_done:
                         cancel_motion(robot, motion_handle)
                     motion_handle = reissue_after_recovery(robot, av, now)
                     last_status_print_at = now
