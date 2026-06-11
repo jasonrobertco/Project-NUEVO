@@ -1,8 +1,9 @@
 """
 main.py - checkpoint 1->5 mission FSM
 =====================================
-CONTROLS: BTN_1 starts the route from IDLE. BTN_2 cancels any active motion
-(including mid-recovery) and returns to IDLE.
+CONTROLS: the route starts from IDLE on a GREEN traffic light (vision-triggered
+auto-start, see GREEN_LIGHT_AUTO_START) OR a BTN_1 press (manual fallback). BTN_2
+cancels any active motion (including mid-recovery) and returns to IDLE.
 
 Route -- an odometry-only scripted drive to checkpoint 2, then LiDAR/LAPF
 obstacle avoidance for the later sections:
@@ -69,6 +70,25 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # cp2->cp3 leg, so the LiDAR weave can be tested without the full approach.
 # Place the robot at the cp2 spot facing +Y first.  >>> False for a full run <<<
 START_AT_CP2 = False
+
+# ---------------------------------------------------------------------------
+# GREEN-LIGHT AUTO-START (vision-triggered race start)
+# ---------------------------------------------------------------------------
+# The course starts on a RED light that turns GREEN. Instead of pressing BTN_1
+# we watch the vision node's traffic-light detections and auto-start when a
+# green light is confirmed. BTN_1 still works as a manual fallback (either one
+# starts the mission). Requires `ros2 run vision vision_node` in another
+# terminal (it publishes /vision/detections, which robot.enable_vision() reads).
+#
+# Set GREEN_LIGHT_AUTO_START = False to revert to BTN_1-only starting.
+GREEN_LIGHT_AUTO_START = True
+# A green reading must persist this many consecutive FSM frames before we go --
+# rejects a single mis-classified frame from false-starting the run.
+GREEN_START_CONFIRM_FRAMES = 5
+# Ignore traffic-light detections weaker than this (0..1 YOLO confidence).
+GREEN_START_MIN_CONFIDENCE = 0.50
+# Treat vision as unavailable if no detections have arrived within this window.
+GREEN_START_VISION_STALE_SEC = 3.0
 
 # Calibrated command for a physical 90-deg turn: a raw 90.0 overshoots by ~10
 # deg, so this is reduced to land on a true right angle. One knob for ALL
@@ -359,6 +379,14 @@ def configure_robot(robot: Robot) -> None:
     robot.start_lidar_world_publisher()
     print("[sensor] lidar enabled for checkpoint 2+ obstacle avoidance")
 
+    # Subscribe to /vision/detections so the IDLE state can auto-start on a
+    # green traffic light (see GREEN_LIGHT_AUTO_START). Harmless if the vision
+    # node isn't running -- detections simply never arrive and we fall back to
+    # the BTN_1 manual start.
+    if GREEN_LIGHT_AUTO_START:
+        robot.enable_vision()
+        print("[sensor] vision enabled for green-light auto-start (BTN_1 still works)")
+
 
 def start_robot(robot: Robot) -> None:
     current = robot.get_state()
@@ -382,6 +410,27 @@ def show_idle_leds(robot: Robot) -> None:
 def show_running_leds(robot: Robot) -> None:
     robot.set_led(LED.ORANGE, 0)
     robot.set_led(LED.GREEN, 200)
+
+
+def green_light_visible(robot: Robot) -> bool:
+    """True if the vision node currently sees a confident GREEN traffic light.
+
+    Reads the latest /vision/detections (cached by robot.enable_vision()), keeps
+    only "traffic light" detections above GREEN_START_MIN_CONFIDENCE, and checks
+    their classified "color" attribute (set by vision's classify_traffic_light_color).
+    Returns False if vision is stale/unavailable, so a missing vision node simply
+    leaves the BTN_1 manual start as the only path.
+    """
+    if not robot.is_vision_active(timeout_s=GREEN_START_VISION_STALE_SEC):
+        return False
+
+    for detection in robot.get_detections("traffic light"):
+        if float(detection["confidence"]) < GREEN_START_MIN_CONFIDENCE:
+            continue
+        color = detection.get("attributes", {}).get("color", {}).get("value")
+        if color == "green":
+            return True
+    return False
 
 
 def cancel_motion(robot: Robot, handle) -> None:
@@ -1034,6 +1083,7 @@ def run(robot: Robot) -> None:
     av: dict = {}  # active obstacle-avoidance segment + watchdog context
     step_index = 0
     last_status_print_at = 0.0
+    green_streak = 0  # consecutive IDLE frames seeing green (auto-start confirm)
 
     period = 1.0 / float(DEFAULT_FSM_HZ)
     next_tick = time.monotonic()
@@ -1047,7 +1097,12 @@ def run(robot: Robot) -> None:
             show_idle_leds(robot)
             step_index = 0
             av = {}
-            print("[FSM] IDLE - press BTN_1 to start checkpoint 3 mission, BTN_2 to cancel")
+            green_streak = 0  # require a fresh green confirmation each time we idle
+            if GREEN_LIGHT_AUTO_START:
+                print("[FSM] IDLE - waiting for GREEN light to auto-start "
+                      "(or press BTN_1); BTN_2 to cancel")
+            else:
+                print("[FSM] IDLE - press BTN_1 to start checkpoint 3 mission, BTN_2 to cancel")
             print(
                 f"[CFG] scripted steps ({len(MISSION_STEPS)}): "
                 + ", ".join(step.label for step in MISSION_STEPS)
@@ -1082,7 +1137,29 @@ def run(robot: Robot) -> None:
             state = "IDLE"
 
         elif state == "IDLE":
-            if robot.was_button_pressed(Button.BTN_1):
+            # START TRIGGER: two ways to leave IDLE, whichever fires first --
+            #   (1) GREEN-LIGHT AUTO-START: the course begins on a red light that
+            #       turns green. We poll vision each frame and require green for
+            #       GREEN_START_CONFIRM_FRAMES consecutive frames (a streak) so a
+            #       single mis-classified frame can't false-start. Any non-green
+            #       frame resets the streak. Gated by GREEN_LIGHT_AUTO_START.
+            #   (2) BTN_1 MANUAL START: always available as a fallback (e.g. if the
+            #       camera can't see the light), exactly as before.
+            # Both lead into the same start sequence below.
+            button_start = robot.was_button_pressed(Button.BTN_1)
+
+            green_start = False
+            if GREEN_LIGHT_AUTO_START and not button_start:
+                if green_light_visible(robot):
+                    green_streak += 1
+                    if green_streak >= GREEN_START_CONFIRM_FRAMES:
+                        green_start = True
+                else:
+                    green_streak = 0
+
+            if button_start or green_start:
+                green_streak = 0
+                print(f"[FSM] START trigger: {'BTN_1' if button_start else 'GREEN light'}")
                 if START_AT_CP2:
                     # TEMP/testing path: skip the scripted cp1->cp2 steps and jump
                     # to the cp2->cp3 leg. reset_mission_pose() zeroes odometry to
