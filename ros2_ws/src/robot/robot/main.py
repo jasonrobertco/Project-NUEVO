@@ -1606,17 +1606,19 @@ def run(robot: Robot) -> None:
                     detect_wall = av.get("terminate_on_wall")
                     front = wall_ahead_clearance_mm(robot) if detect_wall else math.inf
                     fire_turn = False
-                    if front <= 300.0:
-                        # Unambiguous end wall directly ahead: only the end wall is
-                        # this close on the approach line, so skip the odometry
-                        # advance gate (which deflates under lateral drift / wheel
-                        # slip and can veto a legitimate wall detect).
+                    if front <= WALL_DETECT_STANDOFF_MM:
                         advance = advance_along_axis_mm(robot, av)
-                        fire_turn = True
-                        print(f"[FSM] cp3 wall override: front {front:.0f} mm — bypassing advance gate")
-                    elif front <= WALL_DETECT_STANDOFF_MM:
-                        advance = advance_along_axis_mm(robot, av)
-                        if advance >= CHECKPOINT_3_MIN_ADVANCE_MM:
+                        if front <= 300.0 and advance >= 1500.0:
+                            # Unambiguous end wall directly ahead AND past the cone
+                            # field (>= ~2.5 tiles): a cone at 300 mm earlier in the
+                            # course must NOT trigger this. Bypasses the full advance
+                            # gate but still requires the robot to be past the cones.
+                            fire_turn = True
+                            print(
+                                f"[FSM] cp3 wall override: front {front:.0f} mm, "
+                                f"advance {advance:.0f} mm — bypassing advance gate"
+                            )
+                        elif advance >= CHECKPOINT_3_MIN_ADVANCE_MM:
                             fire_turn = True
                         elif (now - av.get("last_gate_log_at", 0.0)) >= STATUS_PRINT_INTERVAL_S:
                             # Wall is in range but the advance gate is holding the
@@ -1807,10 +1809,11 @@ def run(robot: Robot) -> None:
                 #     )
                 #     state = "IDLE"
                 elif math.isfinite(front) and front < in_lower:
-                    # Too close to creep further: hold and keep sampling (jitter may
-                    # settle back into range).
-                    robot.stop()
+                    # Overshot: already closer than the standoff target -> reverse
+                    # back out to the target band instead of holding (driving forward
+                    # would only close the gap further).
                     av["wall_inrange_count"] = 0
+                    robot.set_velocity(-WALL_APPROACH_SPEED_MM_S, 0.0)
                 elif math.isfinite(front):
                     # Still beyond the band (front > target): creep closer.
                     av["wall_inrange_count"] = 0
