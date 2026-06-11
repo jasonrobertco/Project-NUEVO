@@ -70,7 +70,7 @@ STATUS_PRINT_INTERVAL_S = 0.5
 # resets odometry to the cp2 start pose (0,0, +Y) and jumps straight into the
 # cp2->cp3 leg, so the LiDAR weave can be tested without the full approach.
 # Place the robot at the cp2 spot facing +Y first.  >>> False for a full run <<<
-START_AT_CP2 = True
+START_AT_CP2 = False
 
 # ---------------------------------------------------------------------------
 # PART 1 NAVIGATION MODE (cp1 -> cp2, bridge approach)
@@ -90,7 +90,7 @@ PART1_NAV_MODE = "closed_loop"
 # terminal (it publishes /vision/detections, which robot.enable_vision() reads).
 #
 # Set GREEN_LIGHT_AUTO_START = False to revert to BTN_1-only starting.
-GREEN_LIGHT_AUTO_START = True
+GREEN_LIGHT_AUTO_START = False
 # A green reading must persist this many consecutive FSM frames before we go --
 # rejects a single mis-classified frame from false-starting the run.
 GREEN_START_CONFIRM_FRAMES = 5
@@ -156,9 +156,9 @@ WAYPOINT_CORRECTION_TIMEOUT_S = 8.0      # per-move cap so a correction can't ha
 # Scripted distances -- EMPIRICALLY HAND-TUNED on the physical bridge/ramp, not
 # derived from the course grid. Don't change without re-tuning on the venue; the
 # cp1/2 sequence is meant to stay behaviorally fixed.
-CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
+CHECKPOINT_1_APPROACH_DISTANCE_MM = 2850.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
-BRIDGE_CROSS_DISTANCE_MM = 2350.0            # length of the bridge/ramp crossing
+BRIDGE_CROSS_DISTANCE_MM = 2420.0            # length of the bridge/ramp crossing
 BRIDGE_EXIT_DISTANCE_MM = 600.0              # post-bridge corner hop (hand-tuned, not a tile)
 
 # --- Bridge-entry wall-square correction -----------------------------------
@@ -193,7 +193,7 @@ CHECKPOINT_4_STRAIGHT_TILES = 5.0
 CHECKPOINT_3_APPROACH_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_APPROACH_TILES
 # CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_3_FINAL_STRAIGHT_TILES  # ORIGINAL: 610 mm (1 tile)
 # CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = 2600.0  # prior: full straightaway, stopped at the end wall
-CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = 2525.0  # 2600 to the checkpoint, -75 mm backoff from the end wall
+CHECKPOINT_3_FINAL_STRAIGHT_DISTANCE_MM = 2425.0  # 2600 to the checkpoint, -75 mm backoff from the end wall
 CHECKPOINT_4_DISTANCE_MM = COURSE_TILE_MM * CHECKPOINT_4_STRAIGHT_TILES
 
 # --- LAPF tuning (checkpoint 2+ obstacle-avoidance runs) ---
