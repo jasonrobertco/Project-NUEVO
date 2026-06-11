@@ -159,7 +159,7 @@ WAYPOINT_CORRECTION_TIMEOUT_S = 8.0      # per-move cap so a correction can't ha
 CHECKPOINT_1_APPROACH_DISTANCE_MM = 2800.0   # start -> checkpoint 1 approach point
 BRIDGE_ALIGN_DISTANCE_MM = 500.0             # short nudge into the bridge lane
 BRIDGE_CROSS_DISTANCE_MM = 2450.0            # length of the bridge/ramp crossing
-BRIDGE_EXIT_DISTANCE_MM = 900.0              # post-bridge corner hop (hand-tuned, not a tile)
+BRIDGE_EXIT_DISTANCE_MM = 800.0              # post-bridge corner hop (hand-tuned, not a tile)
 
 # --- Bridge-entry wall-square correction -----------------------------------
 # The bridge is crossed open-loop over a long distance, so heading error from
