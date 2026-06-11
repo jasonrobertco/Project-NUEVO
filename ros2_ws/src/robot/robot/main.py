@@ -394,6 +394,17 @@ WALL_FINISH_SANITY_BAND_MM = 120.0     # warn if a reading is outside target +/-
 # CCW-positive); flip if it steers INTO the closer wall.
 CP3_STRAIGHTAWAY_CORRECTION_SIGN = 1               # flip to -1 if it corrects the wrong way
 CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM = 0.06   # deg/s of yaw per mm of error (was 0.08; lowered, slight overcorrection)
+# Yaw-rate-on-lateral-error is an undamped oscillator (d2e/dt2 = -v*Kp*e), so P
+# alone swings symmetrically wall-to-wall and never settles. The D term damps it.
+# Model: omega = sqrt(v*(pi/180)*Kp) ~ 0.38 rad/s at v=140, Kp=0.06; critical
+# damping needs Kd ~ 0.31, so ~0.25 gives a slightly-underdamped, quick settle.
+# Tune: raise Kd if it still overshoots, lower if it crawls/jitters.
+CP3_STRAIGHTAWAY_CORRECTION_KD_DEG_PER_MM_S = 0.25 # deg/s of yaw per (mm/s) of error rate (damping)
+CP3_STRAIGHTAWAY_ERROR_EMA_ALPHA = 0.12            # low-pass on the (noisy lidar) error before differentiating
+# Soft deadband: drive STRAIGHT while |error| is within this band, and only
+# correct on the excess past it -- so it goes mostly straight and nudges only on
+# a genuine drift toward a wall, not on lidar noise. Raise to ignore more drift.
+CP3_STRAIGHTAWAY_DEADBAND_MM = 90.0
 CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S = 20.0       # cap on the yaw correction
 CP3_STRAIGHTAWAY_WALL_MAX_MM = 450.0      # a side reading beyond this is an OPENING/gap, not a wall (don't center off it)
 CP3_STRAIGHTAWAY_FOLLOW_OFFSET_MM = 300.0 # when only one wall is near, hold it at this distance (single-wall follow)
@@ -2134,6 +2145,8 @@ def run(robot: Robot) -> None:
                     av.pop("verify_started_at", None)
                     av.pop("verify_turn_sign", None)
                     av["drive_start_mm"] = robot.get_odometry_pose()[:2]
+                    av.pop("straight_err_filt", None)         # fresh PD derivative state
+                    av.pop("straight_err_filt_t", None)
                     last_status_print_at = now
                     state = "CP3_DRIVE_STRAIGHTAWAY"
                 elif (now - av["verify_started_at"]) >= CP3_VERIFY_ROTATE_TIMEOUT_S:
@@ -2222,11 +2235,31 @@ def run(robot: Robot) -> None:
                         error = None
                     if error is None:
                         correction = 0.0
+                        av["straight_err_filt"] = None        # reset derivative state on gaps
                     else:
-                        correction = (
-                            CP3_STRAIGHTAWAY_CORRECTION_SIGN
-                            * CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM
-                            * error
+                        # PD controller. Pure-P yaw-rate-on-lateral-error is an
+                        # undamped oscillator, so add a damping (D) term. The lidar
+                        # clearance is noisy and D amplifies noise, so low-pass the
+                        # error (EMA) before differentiating.
+                        prev_filt = av.get("straight_err_filt")
+                        prev_t = av.get("straight_err_filt_t")
+                        a = CP3_STRAIGHTAWAY_ERROR_EMA_ALPHA
+                        err_filt = error if prev_filt is None else (1.0 - a) * prev_filt + a * error
+                        # Soft deadband: zero inside the band (drive straight),
+                        # then only the excess past it drives the correction.
+                        db = CP3_STRAIGHTAWAY_DEADBAND_MM
+                        err_eff = math.copysign(max(0.0, abs(err_filt) - db), err_filt)
+                        if prev_filt is None:
+                            d_error = 0.0
+                        else:
+                            prev_eff = math.copysign(max(0.0, abs(prev_filt) - db), prev_filt)
+                            dt = (now - prev_t) if prev_t is not None else period
+                            d_error = (err_eff - prev_eff) / dt if dt > 1e-3 else 0.0
+                        av["straight_err_filt"] = err_filt
+                        av["straight_err_filt_t"] = now
+                        correction = CP3_STRAIGHTAWAY_CORRECTION_SIGN * (
+                            CP3_STRAIGHTAWAY_CORRECTION_KP_DEG_PER_MM * err_eff
+                            + CP3_STRAIGHTAWAY_CORRECTION_KD_DEG_PER_MM_S * d_error
                         )
                         correction = max(
                             -CP3_STRAIGHTAWAY_MAX_CORRECTION_DEG_S,
