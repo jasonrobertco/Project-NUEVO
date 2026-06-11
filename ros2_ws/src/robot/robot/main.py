@@ -327,11 +327,13 @@ WALL_DETECT_ARC_HALF_DEG = 60.0
 # floor. This is the ONLY "far enough that what's ahead must be the wall, not a
 # cone" guard (the end wall is 5 tiles out, so 4 tiles of advance rejects every
 # lower-field cone). NEEDS FIELD TUNING -- the fire-time log prints measured advance.
-CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM   # 4 tiles (2440 mm); end wall at 5 tiles
+# CHECKPOINT_3_MIN_ADVANCE_MM = 4 * COURSE_TILE_MM  # revert here: 2440 mm forced the close override (turn at ~300 mm = pivot collision)
+CHECKPOINT_3_MIN_ADVANCE_MM = 2000.0   # lowered so the square-up fires at ~700 mm wall (pivot needs > swept 440 mm); cone-rejection now handled by the wall-likeness span gate, not this gate
 # WALL_APPROACH_TARGET_MM = 350.0      # revert here: stopped 75 mm closer
 # WALL_APPROACH_TARGET_MM = 475.0      # prior: +125 mm total backoff
 # WALL_APPROACH_TARGET_MM = 700.0      # revert here: doubled-ish standoff, stopped too far
-WALL_APPROACH_TARGET_MM = 300.0        # stop this far from the wall (re-zero); in-range band [250, 300] mm
+# WALL_APPROACH_TARGET_MM = 300.0      # revert here: closer re-zero, but < swept 440 mm so the turn-onto-straightaway pivot FORCED into the wall
+WALL_APPROACH_TARGET_MM = 500.0        # stop this far from the wall (re-zero); in-range band [450, 500] mm; > swept radius 440 mm so the pivot clears
 # WALL_APPROACH_SPEED_MM_S = 80.0      # revert here: too slow, timed out ~640 mm short
 WALL_APPROACH_SPEED_MM_S = 150.0       # closed-loop approach speed (closes the full ~1300 mm in time)
 # WALL_APPROACH_TIMEOUT_S = 8.0        # revert here: too short to close the full distance
@@ -357,8 +359,12 @@ FRONT_CLEARANCE_MAX_RANGE_MM = 2000.0  # ignore returns beyond this when reading
 # Both turns: SIGN *and* MAGNITUDE need physical verification. FACE_WALL may be
 # ~0 (re-zero wall already ahead) or ~90 (perpendicular finish-side wall);
 # FACE_STRAIGHTAWAY then turns onto the finish straightaway. Set both on the venue.
-CP3_FACE_WALL_TURN_DEG = RIGHT_ANGLE_TURN_DEG          # face the re-zero wall (SIGN UNVERIFIED)
-CP3_FACE_STRAIGHTAWAY_TURN_DEG = RIGHT_ANGLE_TURN_DEG  # turn onto the finish straightaway (SIGN UNVERIFIED)
+# Turn RIGHT (toward +X / east) onto the finish straightaway. turn_by(+) rotated
+# the robot CCW/left in the run log (theta 91->172->252, ending nose-into a wall),
+# so right turns are NEGATIVE here. (Sign confirmed against the course direction;
+# magnitudes still field-tunable -- keep BTN_2 ready.)
+CP3_FACE_WALL_TURN_DEG = -RIGHT_ANGLE_TURN_DEG          # turn right to face the re-zero wall
+CP3_FACE_STRAIGHTAWAY_TURN_DEG = -RIGHT_ANGLE_TURN_DEG  # turn right onto the finish straightaway
 
 # Forward "onto the straightaway" move after the post-wall turn (single wall
 # approach -- no wall 2 any more). Open-loop; ends -> verify + drive straightaway.
