@@ -1606,7 +1606,15 @@ def run(robot: Robot) -> None:
                     detect_wall = av.get("terminate_on_wall")
                     front = wall_ahead_clearance_mm(robot) if detect_wall else math.inf
                     fire_turn = False
-                    if front <= WALL_DETECT_STANDOFF_MM:
+                    if front <= 300.0:
+                        # Unambiguous end wall directly ahead: only the end wall is
+                        # this close on the approach line, so skip the odometry
+                        # advance gate (which deflates under lateral drift / wheel
+                        # slip and can veto a legitimate wall detect).
+                        advance = advance_along_axis_mm(robot, av)
+                        fire_turn = True
+                        print(f"[FSM] cp3 wall override: front {front:.0f} mm — bypassing advance gate")
+                    elif front <= WALL_DETECT_STANDOFF_MM:
                         advance = advance_along_axis_mm(robot, av)
                         if advance >= CHECKPOINT_3_MIN_ADVANCE_MM:
                             fire_turn = True
