@@ -1794,9 +1794,9 @@ def run(robot: Robot) -> None:
                     fire_turn = False
                     if front <= WALL_DETECT_STANDOFF_MM:
                         advance = advance_along_axis_mm(robot, av)
-                        if front <= 300.0 and advance >= 1500.0:
+                        if front <= 450.0 and advance >= 1500.0:
                             # Unambiguous end wall directly ahead AND past the cone
-                            # field (>= ~2.5 tiles): a cone at 300 mm earlier in the
+                            # field (>= ~2.5 tiles): a cone at 450 mm earlier in the
                             # course must NOT trigger this. Bypasses the full advance
                             # gate but still requires the robot to be past the cones.
                             fire_turn = True
