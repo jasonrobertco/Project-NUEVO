@@ -43,8 +43,8 @@ PITCH_MAX_DEG = 210.0
 # Loader arm — uses set_servo_pulse so angles can go below 0°
 LOADER_MIN_DEG = -90.0              # most negative allowed (maps to 500 µs)
 LOADER_MAX_DEG = 180.0              # most positive allowed (maps to 2500 µs)
-LOADER_REST_DEG = 120.0
-LOADER_PUSH_DEG = 220.0
+LOADER_REST_DEG = 130.0
+LOADER_PUSH_DEG = 67.0
 LOADER_PUSH_DWELL_S = 0.15          # used by load() test cycle
 LOADER_RETURN_DWELL_S = 0.10
 SHOT_LOADER_HOLD_S = 0.20           # pause at push before flywheel spins up
