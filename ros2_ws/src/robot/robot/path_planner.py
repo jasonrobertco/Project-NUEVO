@@ -15,6 +15,22 @@ import math
 import numpy as np
 
 # =============================================================================
+# Body-footprint clearance override (LAPF)
+# =============================================================================
+# The LAPF force is sampled at the virtual target, which eff_radius holds
+# ~300 mm clear of any cone; the real body is never evaluated, so it can sweep
+# into a cone the target has cleared. _apply_body_clearance (called at the end of
+# LeashedAPFPlanner.navigate_to_goal) is an ADDITIVE override that steers the
+# BODY off a cone it is about to contact. It does not change the APF, eff_radius,
+# leash, or escape. Footprint is anchored at the FRONT EDGE (fwd=0), matching the
+# obstacle-cloud frame (LIDAR_MOUNT_X_MM=0): fwd in [-ROBOT_BODY_LENGTH_MM, 0],
+# left in +/-ROBOT_BODY_HALF_WIDTH_MM.
+ROBOT_BODY_LENGTH_MM      = 400.0
+ROBOT_BODY_HALF_WIDTH_MM  = 200.0   # do NOT raise toward 225 without re-checking the 610 mm corridor: 2*(75+225) > 610 closes it
+BODY_CLEARANCE_TRIGGER_MM = 130.0   # start reacting when a cone edge is within this of the footprint
+BODY_CLEARANCE_STOP_MM    = 30.0    # at/below this, linear floors and it turns away hardest
+
+# =============================================================================
 # Base class
 # =============================================================================
 
@@ -413,11 +429,16 @@ class LeashedAPFPlanner:
         # goal's right). Set when the force nulls between obstacle clusters and
         # held until the robot is clear, so the escape doesn't flip-flop.
         self._committed_escape_sign: int | None = None
+        # Committed steer side for the body-footprint clearance override
+        # (-1 = steer right / away from a left cone, +1 = steer left). Held with
+        # hysteresis so it can't oscillate per tick; None when nothing is gated.
+        self._body_avoid_sign: int | None = None
 
     def reset(self) -> None:
         self._virtual_target = None
         self._force_ema = None
         self._committed_escape_sign = None
+        self._body_avoid_sign = None
 
     def get_virtual_target(self) -> tuple[float, float] | None:
         return self._virtual_target
@@ -438,6 +459,100 @@ class LeashedAPFPlanner:
         target = self.update_virtual_target(pose, goal, obstacles, dt)
         linear, angular = self._tracker.compute_velocity_to_point(pose, target, self._max_linear)
         linear *= self._forward_speed_scale(pose, obstacles)
+        linear, angular = self._apply_body_clearance(pose, obstacles, linear, angular)
+        return linear, angular
+
+    def _apply_body_clearance(
+        self,
+        pose: tuple[float, float, float],
+        obstacles: np.ndarray,
+        linear: float,
+        angular: float,
+    ) -> tuple[float, float]:
+        """Additive body-footprint clearance override.
+
+        The APF samples force at the virtual target (held ~300 mm off any cone by
+        eff_radius); the real body is never evaluated and can sweep into a cone
+        the target has cleared. This models the robot as a rectangle anchored at
+        the front edge (fwd in [-ROBOT_BODY_LENGTH_MM, 0], left in
+        +/-ROBOT_BODY_HALF_WIDTH_MM, matching the cloud frame) and, when the
+        nearest gated cone is within BODY_CLEARANCE_TRIGGER_MM of that rectangle,
+        ADDS a yaw away from it and slows linear. Composes with the pure-pursuit
+        command (never overwrites), holds a committed steer side to kill per-tick
+        flip, and is inert when nothing is gated so open-field behavior is
+        unchanged. Reuses the disks already fetched this tick — no re-fetch.
+        """
+        obs = np.asarray(obstacles, dtype=float)
+        if obs.ndim != 2 or obs.shape[0] == 0:
+            self._body_avoid_sign = None
+            return linear, angular
+
+        px, py, theta = pose
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+
+        # Nearest gated-cone clearance per side (left >= 0 / right < 0). The gates
+        # drop cones that the body would not hit: the FORWARD gate ignores cones
+        # at/behind the front edge (fwd <= 0) — including the fwd ~ -400 rear
+        # phantoms the 360 lidar sees, which were driving the in-place shake — and
+        # the LATERAL gate ignores cones clearly off to the side.
+        clr_left = float("inf")
+        clr_right = float("inf")
+        for row in obs:
+            ox = float(row[0])
+            oy = float(row[1])
+            radius = float(row[2]) if row.shape[0] >= 3 else 0.0
+            dx = ox - px
+            dy = oy - py
+            fwd = cos_t * dx + sin_t * dy
+            if fwd <= 0.0:                                              # forward gate
+                continue
+            left = -sin_t * dx + cos_t * dy
+            if abs(left) > ROBOT_BODY_HALF_WIDTH_MM + radius + 40.0:    # lateral gate
+                continue
+            # Nearest point on the front-edge footprint rectangle to the cone center.
+            clamped_fwd = min(0.0, max(-ROBOT_BODY_LENGTH_MM, fwd))
+            clamped_left = min(ROBOT_BODY_HALF_WIDTH_MM, max(-ROBOT_BODY_HALF_WIDTH_MM, left))
+            clearance = math.hypot(fwd - clamped_fwd, left - clamped_left) - radius
+            if left >= 0.0:
+                clr_left = min(clr_left, clearance)
+            else:
+                clr_right = min(clr_right, clearance)
+
+        nearest_clearance = min(clr_left, clr_right)
+        if not math.isfinite(nearest_clearance):                       # nothing gated
+            self._body_avoid_sign = None
+            return linear, angular
+
+        # Commit the steer side with 80 mm hysteresis so it can't flip per tick.
+        # sign = -1 steers right (away from a LEFT cone); +1 steers left (away
+        # from a RIGHT cone). Positive angular = CCW (left), per pure pursuit.
+        if self._body_avoid_sign is None:
+            self._body_avoid_sign = -1 if clr_left <= clr_right else 1
+        elif self._body_avoid_sign == -1:
+            if clr_right < clr_left - 80.0:
+                self._body_avoid_sign = 1
+        else:
+            if clr_left < clr_right - 80.0:
+                self._body_avoid_sign = -1
+        sign = self._body_avoid_sign
+
+        span = BODY_CLEARANCE_TRIGGER_MM - BODY_CLEARANCE_STOP_MM
+        if span <= 1e-6:
+            t = 1.0 if nearest_clearance <= BODY_CLEARANCE_STOP_MM else 0.0
+        else:
+            t = (BODY_CLEARANCE_TRIGGER_MM - nearest_clearance) / span
+            t = max(0.0, min(1.0, t))
+
+        # Cap added yaw at 0.5*max_angular; floor linear at 0.5 so the body keeps
+        # creeping forward off the cone and never pivots in place.
+        added_yaw = sign * t * 0.5 * self._max_angular
+        angular = max(-self._max_angular, min(self._max_angular, angular + added_yaw))
+        lin_scale = 1.0 - 0.5 * t
+        linear *= lin_scale
+
+        if t > 0.0:
+            print(f"[lapf-body] nearest cone clearance={nearest_clearance:.0f}mm t={t:.2f} sign{sign:+d} -> yaw{added_yaw:+.2f} lin x{lin_scale:.2f}")
         return linear, angular
 
     def _forward_speed_scale(
