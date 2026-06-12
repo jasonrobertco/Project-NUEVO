@@ -5,6 +5,9 @@ import time
 
 from ament_index_python.packages import get_package_share_directory
 from bridge_interfaces.msg import VisionDetection, VisionDetectionArray
+import cv2
+import cv2.aruco as aruco
+import numpy as np
 import rclpy
 from rclpy.node import Node
 
@@ -35,6 +38,179 @@ CLASSES_OF_INTEREST = [
 ]
 
 DEFAULT_CLASS_FILTER = ",".join(CLASSES_OF_INTEREST)
+
+
+# ===========================================================================
+# ArUco marker + laser dot detection (checkpoint-5 laser targeting)
+# ===========================================================================
+# The lasing code used to open /dev/video10 directly, which conflicts with
+# this node owning the camera. These detectors run in the same frame loop and
+# publish into /vision/detections, so the mission code drives the laser servo
+# entirely through robot.get_detections().
+#
+# Published classes:
+#   "aruco marker" - one per visible marker. bbox = tight quad bounding box.
+#       attributes: marker_id, x_m / y_m / z_m (solvePnP pose, meters).
+#   "laser dot"    - at most one (best-scoring candidate). bbox = small box
+#       centered on the dot. attribute: peak (0-255 detector score).
+#
+# COORDINATE CONVENTION: the camera is mounted upside-down. The lasing
+# calibration (yaw/pitch tables, offset signs) was built on 180-deg-flipped
+# frames, so BOTH detectors run on cv2.flip(frame, -1) and publish coordinates
+# in that flipped frame. The YOLO detections in the same message are in the
+# RAW (unflipped) frame -- do not mix the two coordinate sets.
+
+# Camera intrinsics (full-resolution 4608x2592 calibration, scaled to frame).
+LASER_FX_FULL = 3386.34
+LASER_FY_FULL = 3384.60
+LASER_CX_FULL = 2304.0
+LASER_CY_FULL = 1296.0
+LASER_FULL_WIDTH_PX = 4608.0
+LASER_FULL_HEIGHT_PX = 2592.0
+
+ARUCO_MARKER_SIZE_M = 0.1      # physical marker edge length (match the course!)
+ARUCO_DICT_ID = aruco.DICT_4X4_50
+
+LASER_COLOR = "red"            # "red" | "green" | "blue"
+LASER_TOPHAT_KSIZE = 21        # odd; bigger than the dot, smaller than a marker cell
+LASER_SCORE_THRESH = 45        # threshold on the combined (top-hat + color) score
+LASER_COLOR_WEIGHT = 1.0       # color cue weight vs. the top-hat cue
+LASER_MIN_AREA = 1             # px^2, reject single-pixel sensor noise
+LASER_MAX_AREA = 1200          # px^2, reject large bright blobs
+LASER_DOT_BBOX_PX = 6          # published bbox edge length around the dot center
+
+_ARUCO_DICT = aruco.getPredefinedDictionary(ARUCO_DICT_ID)
+try:
+    _ARUCO_PARAMS = aruco.DetectorParameters_create()
+except AttributeError:  # OpenCV >= 4.7 renamed the constructor
+    _ARUCO_PARAMS = aruco.DetectorParameters()
+
+_ARUCO_HALF = ARUCO_MARKER_SIZE_M / 2.0
+_ARUCO_OBJ_POINTS = np.array(
+    [[-_ARUCO_HALF, _ARUCO_HALF, 0], [_ARUCO_HALF, _ARUCO_HALF, 0],
+     [_ARUCO_HALF, -_ARUCO_HALF, 0], [-_ARUCO_HALF, -_ARUCO_HALF, 0]],
+    dtype=np.float32,
+)
+_ARUCO_DIST_COEFFS = np.zeros((4, 1))
+
+
+def _laser_camera_matrix(frame_width: int, frame_height: int) -> np.ndarray:
+    """Scale the full-resolution intrinsic matrix down to the actual frame size."""
+    sx = frame_width / LASER_FULL_WIDTH_PX
+    sy = frame_height / LASER_FULL_HEIGHT_PX
+    return np.array(
+        [[LASER_FX_FULL * sx, 0, LASER_CX_FULL * sx],
+         [0, LASER_FY_FULL * sy, LASER_CY_FULL * sy],
+         [0, 0, 1]],
+        dtype=np.float32,
+    )
+
+
+def _detect_aruco_markers(flipped_bgr) -> list[DetectedObject]:
+    gray = cv2.cvtColor(flipped_bgr, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = aruco.detectMarkers(gray, _ARUCO_DICT, parameters=_ARUCO_PARAMS)
+    if ids is None:
+        return []
+
+    h, w = flipped_bgr.shape[:2]
+    camera_matrix = _laser_camera_matrix(w, h)
+
+    detections: list[DetectedObject] = []
+    for i in range(len(ids)):
+        pts = corners[i][0]  # 4x2
+        x0, y0 = float(np.min(pts[:, 0])), float(np.min(pts[:, 1]))
+        x1, y1 = float(np.max(pts[:, 0])), float(np.max(pts[:, 1]))
+
+        detection = DetectedObject(
+            class_name="aruco marker",
+            confidence=1.0,
+            x=int(x0),
+            y=int(y0),
+            width=max(1, int(round(x1 - x0))),
+            height=max(1, int(round(y1 - y0))),
+        )
+        detection.add_attribute("marker_id", str(int(ids[i][0])), 1.0)
+
+        success, _rvec, tvec = cv2.solvePnP(
+            _ARUCO_OBJ_POINTS, pts, camera_matrix, _ARUCO_DIST_COEFFS
+        )
+        if success:
+            detection.add_attribute("x_m", f"{float(tvec[0][0]):.4f}", 1.0)
+            detection.add_attribute("y_m", f"{float(tvec[1][0]):.4f}", 1.0)
+            detection.add_attribute("z_m", f"{float(tvec[2][0]):.4f}", 1.0)
+        detections.append(detection)
+    return detections
+
+
+def _detect_laser_dot(flipped_bgr) -> list[DetectedObject]:
+    """Best laser-dot candidate via a combined top-hat + color-difference score.
+
+    The top-hat isolates a SMALL bright spot from LARGE bright regions (white
+    marker cells); the color difference helps on dark areas. Returns at most
+    one detection (the candidate with the highest peak score).
+    """
+    b, g, r = cv2.split(flipped_bgr.astype(np.int16))
+    if LASER_COLOR == "green":
+        diff = g - cv2.max(r, b); chan = g
+    elif LASER_COLOR == "blue":
+        diff = b - cv2.max(r, g); chan = b
+    else:  # red
+        diff = r - cv2.max(g, b); chan = r
+    diff = np.clip(diff, 0, 255).astype(np.uint8)
+    chan = np.clip(chan, 0, 255).astype(np.uint8)
+
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (LASER_TOPHAT_KSIZE, LASER_TOPHAT_KSIZE)
+    )
+    tophat = cv2.morphologyEx(chan, cv2.MORPH_TOPHAT, kernel)
+
+    score = cv2.addWeighted(tophat, 1.0, diff, LASER_COLOR_WEIGHT, 0)
+    score = cv2.GaussianBlur(score, (5, 5), 0)
+
+    _, mask = cv2.threshold(score, LASER_SCORE_THRESH, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    best_xy = None
+    best_peak = -1.0
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < LASER_MIN_AREA or area > LASER_MAX_AREA:
+            continue
+        cmask = np.zeros(score.shape, dtype=np.uint8)
+        cv2.drawContours(cmask, [contour], -1, 255, -1)
+        _, peak, _, _ = cv2.minMaxLoc(score, mask=cmask)
+        if peak > best_peak:
+            moments = cv2.moments(contour)
+            if moments["m00"] == 0:
+                continue
+            best_peak = peak
+            best_xy = (moments["m10"] / moments["m00"], moments["m01"] / moments["m00"])
+
+    if best_xy is None:
+        return []
+
+    half = LASER_DOT_BBOX_PX // 2
+    detection = DetectedObject(
+        class_name="laser dot",
+        confidence=min(1.0, best_peak / 255.0),
+        x=int(round(best_xy[0])) - half,
+        y=int(round(best_xy[1])) - half,
+        width=LASER_DOT_BBOX_PX,
+        height=LASER_DOT_BBOX_PX,
+    )
+    detection.add_attribute("peak", f"{best_peak:.0f}", min(1.0, best_peak / 255.0))
+    return [detection]
+
+
+def detect_laser_targets(frame_bgr) -> list[DetectedObject]:
+    """Run both lasing detectors on one camera frame.
+
+    Flips the frame once (180-deg upside-down mount correction; see the
+    convention note above) and returns aruco-marker + laser-dot detections in
+    flipped-frame coordinates.
+    """
+    flipped = cv2.flip(frame_bgr, -1)
+    return _detect_aruco_markers(flipped) + _detect_laser_dot(flipped)
 
 
 def classify_person_face_lighting(person_crop) -> tuple[str, float]:
@@ -86,6 +262,10 @@ class VisionNode(Node):
         self.declare_parameter("debug_save_latest", True)
         self.declare_parameter("debug_save_timestamped", False)
         self.declare_parameter("debug_max_timestamped_images", 100)
+        # ArUco marker + laser-dot detections for the cp5 lasing phase (see the
+        # detector section above). Published into the same /vision/detections
+        # stream so the mission code never has to open the camera itself.
+        self.declare_parameter("laser_targets_enabled", True)
 
         self._camera_device = str(self.get_parameter("camera_device").value)
         self._camera_width = int(self.get_parameter("camera_width").value)
@@ -100,6 +280,7 @@ class VisionNode(Node):
         self._ncnn_threads = int(self.get_parameter("ncnn_threads").value)
         self._reconnect_delay_sec = max(0.1, float(self.get_parameter("reconnect_delay_sec").value))
         self._log_interval_sec = max(1.0, float(self.get_parameter("log_interval_sec").value))
+        self._laser_targets_enabled = bool(self.get_parameter("laser_targets_enabled").value)
 
         self._publisher = self.create_publisher(VisionDetectionArray, "/vision/detections", 10)
         self._camera = ManagedCamera(
@@ -232,7 +413,13 @@ class VisionNode(Node):
                         face_lighting_label, face_lighting_score = classify_person_face_lighting(person_crop)
                         detection.add_attribute("face_lighting", face_lighting_label, face_lighting_score)
                 
-                all_detections = yolo_detections + yellow_block_detections
+                laser_target_detections = (
+                    detect_laser_targets(frame) if self._laser_targets_enabled else []
+                )
+
+                all_detections = (
+                    yolo_detections + yellow_block_detections + laser_target_detections
+                )
 
                 message = self._build_detection_array_msg(
                     capture_stamp=capture_stamp,
